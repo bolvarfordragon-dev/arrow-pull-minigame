@@ -1,4 +1,4 @@
-import { AD_UNITS } from "./AdUnits";
+import { AD_UNITS, isPlayableAdUnit } from "./AdUnits";
 
 interface WxAd {
   show: () => Promise<void>;
@@ -13,6 +13,21 @@ interface WxApi {
   createRewardedVideoAd?: (opts: { adUnitId: string }) => WxAd;
   createInterstitialAd?: (opts: { adUnitId: string }) => WxAd;
 }
+
+/** 看完或中途关闭。只有 isEnded === true 才发奖。 */
+export interface RewardedClosed {
+  kind: "closed";
+  isEnded: boolean;
+}
+
+/** 广告位还没配，或加载/播放失败。不是玩家关掉视频。 */
+export interface RewardedUnavailable {
+  kind: "unconfigured" | "error";
+}
+
+export type RewardedOutcome = "no-wx" | RewardedClosed | RewardedUnavailable;
+
+export type InterstitialOutcome = "shown" | "no-wx" | "failed" | "unconfigured";
 
 const rewardedCache = new Map<string, WxAd>();
 const interstitialCache = new Map<string, WxAd>();
@@ -46,42 +61,57 @@ async function present(ad: WxAd): Promise<void> {
   }
 }
 
-/** 没有微信环境时返回 "no-wx"，由界面弹出可关闭的桩。看完才返回 isEnded: true。 */
-export async function showRewarded(): Promise<{ isEnded: boolean } | "no-wx"> {
+/**
+ * 没有微信环境时返回 "no-wx"，由界面弹出可关闭的桩。
+ * 广告位为空或仍是占位符时不调用 wx.create*，返回 unconfigured。
+ * onError / show 失败是 error；玩家关掉视频才是 closed 且 isEnded 可能为 false。
+ */
+export async function showRewarded(): Promise<RewardedOutcome> {
   const wx = wxApi();
-  const ad = cached(rewardedCache, AD_UNITS.rewarded, wx?.createRewardedVideoAd);
-  if (!ad) return "no-wx";
+  if (!wx?.createRewardedVideoAd) return "no-wx";
+  if (!isPlayableAdUnit(AD_UNITS.rewarded)) return { kind: "unconfigured" };
+  const ad = cached(rewardedCache, AD_UNITS.rewarded, wx.createRewardedVideoAd);
+  if (!ad) return { kind: "unconfigured" };
   return new Promise((resolve) => {
-    const onClose = (res?: { isEnded?: boolean }) => {
-      ad.offClose(onClose);
-      ad.offError(onError);
-      resolve({ isEnded: res?.isEnded === true });
-    };
-    const onError = () => {
-      ad.offClose(onClose);
-      ad.offError(onError);
-      resolve({ isEnded: false });
-    };
-    ad.onClose(onClose);
-    ad.onError(onError);
-    present(ad).catch(onError);
-  });
-}
-
-export async function showInterstitial(): Promise<"shown" | "no-wx" | "failed"> {
-  const wx = wxApi();
-  const ad = cached(interstitialCache, AD_UNITS.interstitial, wx?.createInterstitialAd);
-  if (!ad) return "no-wx";
-  return new Promise((resolve) => {
-    const done = (value: "shown" | "failed") => {
+    let settled = false;
+    const finish = (value: RewardedClosed | RewardedUnavailable) => {
+      if (settled) return;
+      settled = true;
       ad.offClose(onClose);
       ad.offError(onError);
       resolve(value);
     };
-    const onClose = () => done("shown");
-    const onError = () => done("failed");
+    const onClose = (res?: { isEnded?: boolean }) => {
+      finish({ kind: "closed", isEnded: res?.isEnded === true });
+    };
+    const onError = () => {
+      finish({ kind: "error" });
+    };
     ad.onClose(onClose);
     ad.onError(onError);
-    present(ad).catch(onError);
+    present(ad).catch(() => finish({ kind: "error" }));
+  });
+}
+
+export async function showInterstitial(): Promise<InterstitialOutcome> {
+  const wx = wxApi();
+  if (!wx?.createInterstitialAd) return "no-wx";
+  if (!isPlayableAdUnit(AD_UNITS.interstitial)) return "unconfigured";
+  const ad = cached(interstitialCache, AD_UNITS.interstitial, wx.createInterstitialAd);
+  if (!ad) return "unconfigured";
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = (value: "shown" | "failed") => {
+      if (settled) return;
+      settled = true;
+      ad.offClose(onClose);
+      ad.offError(onError);
+      resolve(value);
+    };
+    const onClose = () => finish("shown");
+    const onError = () => finish("failed");
+    ad.onClose(onClose);
+    ad.onError(onError);
+    present(ad).catch(() => finish("failed"));
   });
 }

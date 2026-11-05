@@ -110,13 +110,14 @@ function handcrafted(levelId: number): Level | null {
         solution: ["a2", "a3", "a1"],
       };
     case 10:
+      // 限时关之前的十字路口：横轨上的箭占着交叉点，竖轨要等它让开。
       return {
         id: 10,
-        lines: [line("H", 0, 0, 6, false, true)],
+        lines: [line("H", 1, 0, 6, false, true), line("V", 3, 0, 4, true, true)],
         arrows: [
-          { id: "a1", x: 5, y: 0, dir: "E" },
-          { id: "a2", x: 3, y: 0, dir: "E" },
-          { id: "a3", x: 1, y: 0, dir: "E" },
+          { id: "a1", x: 5, y: 1, dir: "E" },
+          { id: "a2", x: 3, y: 1, dir: "E" },
+          { id: "a3", x: 3, y: 3, dir: "S" },
         ],
         solution: ["a1", "a2", "a3"],
       };

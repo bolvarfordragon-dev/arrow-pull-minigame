@@ -17,18 +17,20 @@
 3. 打开 `assets/scenes/Main.scene`。
 4. 点编辑器上方的**预览**。画面是深色底、浅色轨道、金色箭头。
 5. 第 1 关按住箭头能看到通向出口的虚线，沿箭头方向滑过一段再松手，箭头会滑出。松手但没滑够距离，只取消预览。
-6. 第 2 关先滑后面那只，它会撞上前面那只并弹回。先把前面那只滑出去，再滑后面那只。
+6. 第 2 关先滑后面那只，它会撞上前面那只并弹回。画面上写着「挡路的要先拔」。第一次弹回会再闪一句「被挡住了，先拔前面的」。先把前面那只滑出去，再滑后面那只。
 
 编辑器预览没有微信广告组件。点到需要激励视频或插屏的地方时，会弹出「模拟激励视频 / 模拟插屏」。选**看完**才发奖，选**关闭**不发奖。
+
+微信里顶栏、底栏和棋盘会让开 `getSafeAreaRect` 的安全区，顶栏还会再让开右上角胶囊（`getMenuButtonBoundingClientRect`）。浏览器预览没有这些接口时按整屏排，和以前一样。
 
 ## 玩法规则
 
 - 箭头只沿自己的朝向直行，不转向，也不会停在半路。
 - 第 1–10 关不限时。第 11 关起时限为 `max(25, 20 + 6 × 箭数)` 秒。剩余 10 秒只变色，不弹窗。正在滑行时到点，等这次滑行结束再打开面板。
-- 超时后可以看完激励视频加 20 秒，本关最多 2 次，进度保留。中途关掉视频不加时。
+- 超时后可以看完激励视频加 20 秒，本关最多 2 次，进度保留。中途关掉视频不加时。加时次数用完后，超时面板的主按钮变成「重开」，点下去关掉面板并重开这一关。
 - 每关 1 次免费撤销。用完后可以再看视频撤销，本关最多再撤 2 次。随时可以免费重开，重开不播广告。
 - 每名玩家本地有 3 次免费提示，存在本地存储里。用完后每看完一条激励视频换 1 次。每关最多提示 2 次。提示只高亮下一步该拔的箭头。第 1–5 关不显示提示按钮。当前残局已经无解时，提示改成引导撤销或重开，不播广告。
-- 第 1 关有一句引导：「顺着箭头的方向滑出去」，并有手势虚影。第 1–2 关不播任何广告。
+- 第 1 关有一句引导：「顺着箭头的方向滑出去」，并有手势虚影。第 2 关的引导是「挡路的要先拔」。第 1–2 关不播任何广告。
 
 ## 广告
 
@@ -40,31 +42,37 @@
 - 任意两次广告至少间隔 30 秒，不够就跳过。
 - 启动、从后台回来、手指还按着、箭头还在滑、失败瞬间，都不自动弹广告。
 
-正式广告位在 `assets/scripts/AdUnits.ts`。把 `adunit-rewarded-placeholder` 和 `adunit-interstitial-placeholder` 换成流量主后台的广告位 ID。微信里走 `wx.createRewardedVideoAd` / `wx.createInterstitialAd`，只有 `isEnded === true` 才发奖。
+正式广告位在 `assets/scripts/AdUnits.ts`。把 `adunit-rewarded-placeholder` 和 `adunit-interstitial-placeholder` 换成流量主后台的广告位 ID，不要填伪造的 ID。空字符串或仍然带 `placeholder` 时不会调用 `wx.createRewardedVideoAd` / `wx.createInterstitialAd`，界面提示「广告暂时不能播放」。
+
+微信里走真实广告组件。玩家把视频看完（`isEnded === true`）才发奖；中途关闭是 `isEnded === false`，不发奖，并计入 30 秒间隔。加载或播放失败不是中途关闭，不发奖，也不进入这 30 秒冷却。
 
 ## 构建微信小游戏
 
 1. 在 Creator 3.8.6 里打开 **项目 → 构建发布**。
 2. 发布平台选 **微信小游戏**，设备方向选**竖屏**，填写小游戏 AppID。
-3. 构建。产物在 `build/wechatgame`。
+3. 构建。产物在 `build/wechatgame`。仓库里目前这份目录只是云端构建不了时留下的说明，本地构建会覆盖它。
 4. 打开微信开发者工具，导入 `build/wechatgame` 目录。
-5. 用真机预览滑动和广告。开发者工具里广告位未开通时，关闭视频应不发奖。
+5. 用真机预览滑动和广告。开发者工具里广告位未开通时，应提示「广告暂时不能播放」，而不是把失败当成没看完并进入 30 秒冷却。
+
+`settings/v2/packages/engine.json` 里没有勾选 `physics-2d-box2d-wasm`。这盘棋不用 2D 物理，正式构建不应再把 box2d.wasm 打进主包。
 
 广告组件通常要小游戏累计独立访客达到平台门槛后才能开通。这是发布限制，不是关卡数值。
 
+云端 Linux 环境没有 Cocos Creator 3.8.6（这个版本不提供 Linux 编辑器），所以这里提交的 `build/wechatgame` 不是可玩的引擎产物。说明在 `build/wechatgame/BUILD_GAP.md`。可玩包要在装了 Creator 3.8.6 的 Windows 或 macOS 上重新构建。
+
 ## 关卡数据
 
-`assets/resources/levels/level-01.json` 到 `level-60.json` 共 60 关。每关有轨道、箭头和一条标准解。运行时读的是同步生成的 `assets/scripts/core/level-pack.ts`。
+60 关只写在 `assets/scripts/core/generate.ts`。运行时调用 `generateAll()`，不再另存 `level-pack.ts` 或 `assets/resources/levels/*.json`，避免同一份关卡进两次包。
 
 ```bash
 npm install
 npm test
-npm run generate-levels   # 改了生成器之后再跑，会同时重写 JSON 和 level-pack.ts
+npm run generate-levels   # 只检查关卡可解且互不重复，不再写出第二份数据
 ```
 
 `npm test` 会检查：
 
-- 60 关都能按标准解清空
+- 60 关都能按标准解清空，而且除了关卡号以外没有两关完全一样
 - 箭数落在关卡段里（第 2 关按新手脚本是 2 只箭，用来教弹回）
 - 时限公式、滑行途中不提前弹出超时面板
 - 复活必须 `isEnded`，每关最多 2 次，每次 +20 秒
@@ -75,9 +83,10 @@ npm run generate-levels   # 改了生成器之后再跑，会同时重写 JSON �
 ## 目录
 
 - `assets/scenes/Main.scene`：入口场景，Canvas 上挂着 `GameController`
-- `assets/scripts/GameController.ts`：绘制、按住预览、滑动、面板
-- `assets/scripts/WxAds.ts`：微信广告；没有 `wx` 时交给界面上的桩
-- `assets/scripts/core/`：轨迹、关卡生成、校验、时限、广告闸门、对局状态
+- `assets/scripts/GameController.ts`：绘制、按住预览、滑动、面板、安全区
+- `assets/scripts/WxAds.ts`：微信广告；没有 `wx` 时交给界面上的桩；占位符不创建广告
+- `assets/scripts/AdUnits.ts`：广告位。发布前换成真实 ID
+- `assets/scripts/core/`：轨迹、关卡生成、校验、时限、广告闸门、对局状态、安全区内边距
 - `test/`：`npm test` 用的用例
 
-不进库的目录：`library/`、`temp/`、`local/`、`build/`、`profiles/`、`node_modules/`。
+不进库的目录：`library/`、`temp/`、`local/`、`profiles/`、`node_modules/`，以及 `build/` 里除 `build/wechatgame` 以外的产物。`build/wechatgame` 目前只记录云端构建不了的说明，见该目录里的 `BUILD_GAP.md`。

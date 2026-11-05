@@ -26,8 +26,12 @@ export interface AdWorld {
   clearedLevelId: number;
 }
 
-export function rewardGranted(result: { isEnded?: boolean } | null | undefined): boolean {
-  return !!result && result.isEnded === true;
+/**
+ * 只有玩家把激励视频看完（isEnded === true）才发奖。
+ * failed 表示加载或播放失败，不是中途关闭，不能当成 isEnded:false 去扣冷却。
+ */
+export function rewardGranted(result: { isEnded?: boolean; failed?: boolean } | null | undefined): boolean {
+  return !!result && result.failed !== true && result.isEnded === true;
 }
 
 function sharedDeny(world: AdWorld): AdDenyReason | null {

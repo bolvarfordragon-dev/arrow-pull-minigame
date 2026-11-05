@@ -244,3 +244,54 @@ test("time floor is 25 seconds even when the arrow term is smaller", () => {
   assert.equal(timeLimitSeconds(11, 1), 26);
   assert.equal(timeLimitSeconds(46, 12), 92);
 });
+
+test("restart during a win does not throw when advance runs afterwards", () => {
+  const game = new Game(campaignBank, memoryKv(), () => 0, { levelId: 1 });
+  playSolution(game);
+  assert.equal(game.phase, "win");
+  game.restart();
+  assert.equal(game.advance(), "not-won");
+  assert.equal(game.levelId, 1);
+  assert.equal(game.phase, "play");
+  assert.equal(game.arrows.length, 1);
+});
+
+test("level 2 says to pull the blocker first and tips on the first bounce", () => {
+  const level1 = new Game(campaignBank, memoryKv(), () => 0, { levelId: 1 });
+  assert.equal(level1.tutorialText, "顺着箭头的方向滑出去");
+  assert.equal(level1.bounceTip, null);
+
+  const game = new Game(campaignBank, memoryKv(), () => 0, { levelId: 2 });
+  assert.equal(game.tutorialText, "挡路的要先拔");
+  assert.equal(game.bounceTip, "被挡住了，先拔前面的");
+  assert.equal(game.beginSlide("a2")?.result, "arrow");
+  const first = game.commitSlide();
+  assert.equal(first.outcome, "bounce");
+  assert.equal(first.firstBounce, true);
+  assert.equal(game.beginSlide("a2")?.result, "arrow");
+  assert.equal(game.commitSlide().firstBounce, false);
+  assert.equal(game.tutorialText, "挡路的要先拔");
+  game.restart();
+  assert.equal(game.beginSlide("a2")?.result, "arrow");
+  assert.equal(game.commitSlide().firstBounce, true);
+});
+
+test("a failed ad playback is not a closed video and does not start the cooldown", () => {
+  const clock = { t: 10_000 };
+  const game = new Game(campaignBank, memoryKv({ freeHints: 0, levelId: 6 }), () => clock.t, { levelId: 6 });
+  assert.equal(game.prepareHint().action, "need-ad");
+  const failed = game.finishHint({ isEnded: false, failed: true });
+  assert.equal(failed.granted, false);
+  assert.equal(failed.reason, "playback-error");
+  assert.equal(game.lastAdAtMs, null);
+  assert.equal(game.hintsUsed, 0);
+  const lied = game.finishHint({ isEnded: true, failed: true });
+  assert.equal(lied.granted, false);
+  assert.equal(lied.reason, "playback-error");
+  assert.equal(game.lastAdAtMs, null);
+  const closed = game.finishHint({ isEnded: false });
+  assert.equal(closed.granted, false);
+  assert.equal(closed.reason, "not-ended");
+  assert.equal(game.lastAdAtMs, clock.t);
+  assert.equal(game.hintsUsed, 0);
+});
