@@ -1,0 +1,46 @@
+{
+  "id": 8,
+  "lines": [
+    {
+      "axis": "H",
+      "fixed": 1,
+      "start": 0,
+      "end": 7,
+      "exitStart": false,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 5,
+      "start": 0,
+      "end": 4,
+      "exitStart": true,
+      "exitEnd": false
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "x": 5,
+      "y": 1,
+      "dir": "E"
+    },
+    {
+      "id": "a2",
+      "x": 2,
+      "y": 1,
+      "dir": "E"
+    },
+    {
+      "id": "a3",
+      "x": 5,
+      "y": 4,
+      "dir": "S"
+    }
+  ],
+  "solution": [
+    "a1",
+    "a2",
+    "a3"
+  ]
+}

@@ -1,0 +1,105 @@
+{
+  "id": 45,
+  "lines": [
+    {
+      "axis": "H",
+      "fixed": 0,
+      "start": 0,
+      "end": 7,
+      "exitStart": true,
+      "exitEnd": true
+    },
+    {
+      "axis": "H",
+      "fixed": 2,
+      "start": 0,
+      "end": 7,
+      "exitStart": false,
+      "exitEnd": true
+    },
+    {
+      "axis": "H",
+      "fixed": 4,
+      "start": 0,
+      "end": 7,
+      "exitStart": true,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 1,
+      "start": 0,
+      "end": 4,
+      "exitStart": false,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 3,
+      "start": 0,
+      "end": 4,
+      "exitStart": true,
+      "exitEnd": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "x": 1,
+      "y": 0,
+      "dir": "W"
+    },
+    {
+      "id": "a2",
+      "x": 7,
+      "y": 4,
+      "dir": "E"
+    },
+    {
+      "id": "a3",
+      "x": 3,
+      "y": 0,
+      "dir": "W"
+    },
+    {
+      "id": "a4",
+      "x": 3,
+      "y": 2,
+      "dir": "S"
+    },
+    {
+      "id": "a5",
+      "x": 3,
+      "y": 3,
+      "dir": "S"
+    },
+    {
+      "id": "a6",
+      "x": 4,
+      "y": 4,
+      "dir": "E"
+    },
+    {
+      "id": "a7",
+      "x": 3,
+      "y": 4,
+      "dir": "S"
+    },
+    {
+      "id": "a8",
+      "x": 1,
+      "y": 4,
+      "dir": "E"
+    }
+  ],
+  "solution": [
+    "a1",
+    "a2",
+    "a3",
+    "a4",
+    "a5",
+    "a6",
+    "a7",
+    "a8"
+  ]
+}

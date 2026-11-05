@@ -1,0 +1,16 @@
+{
+  "name": "arrow-pull-minigame",
+  "uuid": "c4e1a8b2-6d30-4f7a-9c15-2b8e0d4f6a31",
+  "creator": {
+    "version": "3.8.6"
+  },
+  "private": true,
+  "scripts": {
+    "generate-levels": "tsx tools/generate-levels.ts",
+    "test": "tsx --test test/*.test.ts"
+  },
+  "devDependencies": {
+    "tsx": "^4.20.5",
+    "typescript": "^5.9.2"
+  }
+}

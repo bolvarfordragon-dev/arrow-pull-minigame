@@ -1,0 +1,39 @@
+{
+  "id": 5,
+  "lines": [
+    {
+      "axis": "H",
+      "fixed": 1,
+      "start": 0,
+      "end": 4,
+      "exitStart": false,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 2,
+      "start": 0,
+      "end": 4,
+      "exitStart": false,
+      "exitEnd": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "x": 2,
+      "y": 1,
+      "dir": "E"
+    },
+    {
+      "id": "a2",
+      "x": 2,
+      "y": 0,
+      "dir": "N"
+    }
+  ],
+  "solution": [
+    "a1",
+    "a2"
+  ]
+}

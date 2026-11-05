@@ -1,0 +1,84 @@
+{
+  "id": 38,
+  "lines": [
+    {
+      "axis": "H",
+      "fixed": 0,
+      "start": 0,
+      "end": 9,
+      "exitStart": true,
+      "exitEnd": true
+    },
+    {
+      "axis": "H",
+      "fixed": 2,
+      "start": 0,
+      "end": 9,
+      "exitStart": true,
+      "exitEnd": true
+    },
+    {
+      "axis": "H",
+      "fixed": 4,
+      "start": 0,
+      "end": 9,
+      "exitStart": false,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 1,
+      "start": 0,
+      "end": 4,
+      "exitStart": true,
+      "exitEnd": true
+    },
+    {
+      "axis": "V",
+      "fixed": 3,
+      "start": 0,
+      "end": 4,
+      "exitStart": true,
+      "exitEnd": true
+    }
+  ],
+  "arrows": [
+    {
+      "id": "a1",
+      "x": 8,
+      "y": 4,
+      "dir": "E"
+    },
+    {
+      "id": "a2",
+      "x": 3,
+      "y": 4,
+      "dir": "E"
+    },
+    {
+      "id": "a3",
+      "x": 3,
+      "y": 2,
+      "dir": "N"
+    },
+    {
+      "id": "a4",
+      "x": 8,
+      "y": 2,
+      "dir": "E"
+    },
+    {
+      "id": "a5",
+      "x": 1,
+      "y": 2,
+      "dir": "E"
+    }
+  ],
+  "solution": [
+    "a1",
+    "a2",
+    "a3",
+    "a4",
+    "a5"
+  ]
+}

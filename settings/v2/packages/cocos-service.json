@@ -1,0 +1,10 @@
+{
+  "__version__": "3.0.9",
+  "game": {
+    "name": "拔箭头",
+    "app_id": "UNKNOW",
+    "c_id": "0"
+  },
+  "appConfigMaps": [],
+  "configs": []
+}
