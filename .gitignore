@@ -1,7 +1,9 @@
 library/
 temp/
 local/
-build/
+/build/*
+!/build/wechatgame/
+!/build/wechatgame/**
 profiles/
 node_modules/
 .vscode/

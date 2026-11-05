@@ -10,13 +10,15 @@ import {
   Layers,
   Node,
   sys,
+  UIOpacity,
   UITransform,
   Vec2,
   Vec3,
   view,
 } from "cc";
 import { Game, type PrepareResult } from "./core/game";
-import { LEVEL_PACK } from "./core/level-pack";
+import { generateAll } from "./core/generate";
+import { safeAreaInsets, withMenuButton, type EdgeInsets, type MenuButtonRect } from "./core/safe-area";
 import { lineCells } from "./core/trace";
 import type { ArrowDef, Cell, Dir, LevelBank, Trace } from "./core/types";
 import { showInterstitial, showRewarded } from "./WxAds";
@@ -29,6 +31,16 @@ const INK = new Color(244, 246, 250, 255);
 const MUTED = new Color(154, 162, 178, 255);
 const DANGER = new Color(232, 112, 96, 255);
 const BUTTON = new Color(38, 44, 60, 255);
+const DIM = new Color(6, 8, 14, 188);
+const GHOST = new Color(242, 193, 78, 90);
+const PREVIEW_COLOR = ACCENT.clone();
+
+const DIR_VECTOR: Record<Dir, Vec2> = {
+  E: new Vec2(1, 0),
+  W: new Vec2(-1, 0),
+  N: new Vec2(0, 1),
+  S: new Vec2(0, -1),
+};
 
 interface Anim {
   id: string;
@@ -38,6 +50,19 @@ interface Anim {
   bounce: boolean;
 }
 
+interface WxWindowInfo {
+  windowWidth?: number;
+  windowHeight?: number;
+  screenWidth?: number;
+  screenHeight?: number;
+}
+
+interface WxHost {
+  getMenuButtonBoundingClientRect?: () => MenuButtonRect;
+  getWindowInfo?: () => WxWindowInfo;
+  getSystemInfoSync?: () => WxWindowInfo;
+}
+
 function uiNode(name: string): Node {
   const node = new Node(name);
   node.layer = Layers.Enum.UI_2D;
@@ -45,16 +70,7 @@ function uiNode(name: string): Node {
 }
 
 function dirVector(dir: Dir): Vec2 {
-  switch (dir) {
-    case "E":
-      return new Vec2(1, 0);
-    case "W":
-      return new Vec2(-1, 0);
-    case "N":
-      return new Vec2(0, 1);
-    default:
-      return new Vec2(0, -1);
-  }
+  return DIR_VECTOR[dir];
 }
 
 @ccclass("GameController")
@@ -66,6 +82,8 @@ export class GameController extends Component {
   private timer!: Label;
   private toast!: Label;
   private hintButton!: Node;
+  private restartButton!: Node;
+  private restartEnabled = true;
   private modal!: Node;
   private modalTitle!: Label;
   private modalBody!: Label;
@@ -88,14 +106,27 @@ export class GameController extends Component {
   private activeTouch: number | null = null;
   private blink = 0;
   private settling = false;
+  private settleToken = 0;
+  private settleWait: (() => void) | null = null;
   private ghost = 0;
+  private drawnFingerprint = "";
+  private cachedLevelId = -1;
+  private cachedLines: Cell[][] = [];
+  private coordCache = new Map<string, Vec2>();
+  private coordStamp = "";
+  private readonly animPointOut = new Vec2();
+  private readonly touchUi = new Vec2();
+  private readonly touchWorld = new Vec3();
+  private readonly touchLocal3 = new Vec3();
+  private readonly touchLocal = new Vec2();
 
   onLoad(): void {
+    const levels = generateAll();
     const bank: LevelBank = {
-      maxId: LEVEL_PACK.length,
+      maxId: levels.length,
       get: (id) => {
-        const level = LEVEL_PACK.find((item) => item.id === id);
-        if (!level) throw new Error(`missing level ${id}`);
+        const level = levels[id - 1];
+        if (!level || level.id !== id) throw new Error(`missing level ${id}`);
         return level;
       },
     };
@@ -121,6 +152,7 @@ export class GameController extends Component {
   }
 
   onDestroy(): void {
+    this.cancelPendingSettle();
     view.setResizeCallback(() => undefined);
   }
 
@@ -130,7 +162,13 @@ export class GameController extends Component {
     const tick = this.game.tick(dt);
     if (tick.timedOut) this.openTimeout();
     if (this.anim) this.stepAnim(dt);
-    this.redraw();
+    // 静止棋盘不每帧清掉重画。预览闪烁、滑行和第一关虚影才需要连帧。
+    const motion = this.anim != null || this.preview != null || this.showsGhost();
+    const fingerprint = motion ? null : this.boardFingerprint();
+    if (motion || fingerprint !== this.drawnFingerprint) {
+      this.redraw();
+      this.drawnFingerprint = fingerprint ?? "";
+    }
     this.syncHud();
   }
 
@@ -149,16 +187,11 @@ export class GameController extends Component {
     const hint = this.makeButton("Hint", "提示", 150);
     const restart = this.makeButton("Restart", "重开", 150);
     this.hintButton = hint;
+    this.restartButton = restart;
+    restart.addComponent(UIOpacity);
     undo.on(Node.EventType.TOUCH_END, () => this.onUndo(), this);
     hint.on(Node.EventType.TOUCH_END, () => this.onHint(), this);
-    restart.on(Node.EventType.TOUCH_END, () => {
-      this.hideModal();
-      this.game.restart();
-      this.settling = false;
-      this.anim = null;
-      this.preview = null;
-      this.layout();
-    }, this);
+    restart.on(Node.EventType.TOUCH_END, () => this.onRestart(), this);
 
     this.modal = uiNode("Modal");
     const modalUi = this.modal.addComponent(UITransform);
@@ -220,30 +253,61 @@ export class GameController extends Component {
     g.stroke();
   }
 
+  private readInsets(size: { width: number; height: number }): EdgeInsets {
+    let safe: { x: number; y: number; width: number; height: number } | null = null;
+    try {
+      const rect = sys.getSafeAreaRect();
+      if (rect) safe = { x: rect.x, y: rect.y, width: rect.width, height: rect.height };
+    } catch {
+      safe = null;
+    }
+    let menu: MenuButtonRect | null = null;
+    let screen: { width: number; height: number } | null = null;
+    try {
+      const wx = (globalThis as { wx?: WxHost }).wx;
+      if (wx?.getMenuButtonBoundingClientRect) {
+        menu = wx.getMenuButtonBoundingClientRect();
+        const info = wx.getWindowInfo?.() ?? wx.getSystemInfoSync?.();
+        // 胶囊坐标相对屏幕左上角，优先用屏幕宽高，没有再退回窗口宽高。
+        const width = info?.screenWidth || info?.windowWidth || 0;
+        const height = info?.screenHeight || info?.windowHeight || 0;
+        if (width > 0 && height > 0) screen = { width, height };
+      }
+    } catch {
+      menu = null;
+      screen = null;
+    }
+    return withMenuButton(size, safeAreaInsets(size, safe), menu, screen);
+  }
+
   private layout(): void {
     const size = view.getVisibleSize();
+    const insets = this.readInsets(size);
     const cam = this.node.getChildByName("Camera")?.getComponent(Camera);
     if (cam) cam.orthoHeight = size.height / 2;
     const boardUi = this.board.getComponent(UITransform)!;
     boardUi.setContentSize(size.width, size.height);
-    this.board.setPosition(0, 0, 0);
+    const shiftX = (insets.left - insets.right) / 2;
+    this.board.setPosition(shiftX, 0, 0);
 
     const bounds = this.gridBounds();
     const spanX = Math.max(1, bounds.maxX - bounds.minX + 1);
     const spanY = Math.max(1, bounds.maxY - bounds.minY + 1);
-    this.cellSize = Math.min(92, (size.width * 0.84) / spanX, (size.height * 0.52) / spanY);
+    const usableW = Math.max(1, size.width - insets.left - insets.right);
+    const usableH = Math.max(1, size.height - insets.top - insets.bottom);
+    this.cellSize = Math.min(92, (usableW * 0.84) / spanX, (usableH * 0.52) / spanY);
     this.originX = (bounds.minX + bounds.maxX) / 2;
     this.originY = (bounds.minY + bounds.maxY) / 2;
-    this.boardShiftY = size.height * 0.04;
+    this.boardShiftY = size.height * 0.04 + (insets.bottom - insets.top) / 2;
 
-    this.title.node.setPosition(0, size.height / 2 - 78, 0);
-    this.timer.node.setPosition(0, size.height / 2 - 128, 0);
-    this.toast.node.setPosition(0, -size.height / 2 + 210, 0);
-    const y = -size.height / 2 + 96;
-    const gap = Math.min(180, size.width * 0.24);
-    this.node.getChildByName("Undo")?.setPosition(-gap, y, 0);
-    this.hintButton.setPosition(0, y, 0);
-    this.node.getChildByName("Restart")?.setPosition(gap, y, 0);
+    this.title.node.setPosition(shiftX, size.height / 2 - 78 - insets.top, 0);
+    this.timer.node.setPosition(shiftX, size.height / 2 - 128 - insets.top, 0);
+    this.toast.node.setPosition(shiftX, -size.height / 2 + 210 + insets.bottom, 0);
+    const y = -size.height / 2 + 96 + insets.bottom;
+    const gap = Math.min(180, usableW * 0.24);
+    this.node.getChildByName("Undo")?.setPosition(shiftX - gap, y, 0);
+    this.hintButton.setPosition(shiftX, y, 0);
+    this.restartButton.setPosition(shiftX + gap, y, 0);
     this.hintButton.active = this.game.hintVisible;
 
     const modalUi = this.modal.getComponent(UITransform)!;
@@ -251,7 +315,7 @@ export class GameController extends Component {
     this.modal.setPosition(0, 0, 0);
     const dim = this.modal.getComponent(Graphics)!;
     dim.clear();
-    dim.fillColor = new Color(6, 8, 14, 188);
+    dim.fillColor = DIM;
     dim.rect(-size.width / 2, -size.height / 2, size.width, size.height);
     dim.fill();
     this.modalTitle.node.setPosition(0, 70, 0);
@@ -280,7 +344,47 @@ export class GameController extends Component {
   }
 
   private toLocal(cell: Cell): Vec2 {
-    return new Vec2((cell.x - this.originX) * this.cellSize, (cell.y - this.originY) * this.cellSize + this.boardShiftY);
+    const stamp = `${this.cellSize},${this.originX},${this.originY},${this.boardShiftY}`;
+    if (stamp !== this.coordStamp) {
+      this.coordCache.clear();
+      this.coordStamp = stamp;
+    }
+    const key = `${cell.x},${cell.y}`;
+    let point = this.coordCache.get(key);
+    if (!point) {
+      point = new Vec2(
+        (cell.x - this.originX) * this.cellSize,
+        (cell.y - this.originY) * this.cellSize + this.boardShiftY,
+      );
+      this.coordCache.set(key, point);
+    }
+    return point;
+  }
+
+  private levelLineCells(): Cell[][] {
+    if (this.cachedLevelId !== this.game.levelId) {
+      this.cachedLevelId = this.game.levelId;
+      this.cachedLines = this.game.lines.map((line) => lineCells(line));
+    }
+    return this.cachedLines;
+  }
+
+  private boardFingerprint(): string {
+    const parts = [
+      String(this.game.levelId),
+      String(this.cellSize),
+      String(this.originX),
+      String(this.originY),
+      String(this.boardShiftY),
+      this.game.highlightId ?? "",
+      this.holdId ?? "",
+    ];
+    for (const arrow of this.game.arrows) parts.push(arrow.id, String(arrow.x), String(arrow.y), arrow.dir);
+    return parts.join(",");
+  }
+
+  private showsGhost(): boolean {
+    return this.game.levelId === 1 && this.game.phase === "play" && !this.anim && this.game.arrows.length === 1;
   }
 
   private syncHud(): void {
@@ -306,9 +410,11 @@ export class GameController extends Component {
     g.clear();
     g.lineCap = Graphics.LineCap.ROUND;
     g.lineJoin = Graphics.LineJoin.ROUND;
-    for (const line of this.game.lines) {
-      const cells = lineCells(line);
-      if (cells.length === 0) continue;
+    const cached = this.levelLineCells();
+    for (let lineIndex = 0; lineIndex < cached.length; lineIndex++) {
+      const cells = cached[lineIndex];
+      const line = this.game.lines[lineIndex];
+      if (!line || cells.length === 0) continue;
       g.strokeColor = PATH;
       g.lineWidth = Math.max(8, this.cellSize * 0.16);
       const first = this.toLocal(cells[0]);
@@ -334,9 +440,7 @@ export class GameController extends Component {
       const hot = arrow.id === this.holdId || arrow.id === this.game.highlightId;
       this.drawArrow(g, p.x, p.y, arrow.dir, 1, hot);
     }
-    if (this.game.levelId === 1 && this.game.phase === "play" && !this.anim && this.game.arrows.length === 1) {
-      this.drawGhost(g, this.game.arrows[0]);
-    }
+    if (this.showsGhost()) this.drawGhost(g, this.game.arrows[0]);
   }
 
   private drawExitCap(g: Graphics, cells: Cell[], open: boolean, which: "start" | "end"): void {
@@ -358,9 +462,8 @@ export class GameController extends Component {
   private drawPreview(g: Graphics, trace: Trace): void {
     const points = trace.points.map((cell) => this.toLocal(cell));
     const alpha = trace.result === "exit" ? 230 : Math.round(140 + 100 * Math.abs(Math.sin(this.blink * 8)));
-    const color = ACCENT.clone();
-    color.a = alpha;
-    g.strokeColor = color;
+    PREVIEW_COLOR.a = alpha;
+    g.strokeColor = PREVIEW_COLOR;
     g.lineWidth = 4;
     const dash = Math.max(10, this.cellSize * 0.22);
     const gap = dash * 0.65;
@@ -382,7 +485,7 @@ export class GameController extends Component {
     g.stroke();
     if (trace.hit) {
       const hit = this.toLocal(trace.hit);
-      g.fillColor = color;
+      g.fillColor = PREVIEW_COLOR;
       g.circle(hit.x, hit.y, this.cellSize * 0.12);
       g.fill();
     }
@@ -416,7 +519,7 @@ export class GameController extends Component {
     const t = (Math.sin(this.ghost * 2.2) + 1) / 2;
     const x = origin.x + d.x * this.cellSize * 0.55 * t;
     const y = origin.y + d.y * this.cellSize * 0.55 * t;
-    g.fillColor = new Color(242, 193, 78, 90);
+    g.fillColor = GHOST;
     g.circle(x, y, this.cellSize * 0.14);
     g.fill();
   }
@@ -458,9 +561,11 @@ export class GameController extends Component {
   }
 
   private touchPoint(event: EventTouch): Vec2 {
-    const ui = event.getUILocation();
-    const local = this.board.getComponent(UITransform)!.convertToNodeSpaceAR(new Vec3(ui.x, ui.y, 0));
-    return new Vec2(local.x, local.y);
+    const ui = event.getUILocation(this.touchUi);
+    this.touchWorld.set(ui.x, ui.y, 0);
+    this.board.getComponent(UITransform)!.convertToNodeSpaceAR(this.touchWorld, this.touchLocal3);
+    this.touchLocal.set(this.touchLocal3.x, this.touchLocal3.y);
+    return this.touchLocal;
   }
 
   private pickArrow(point: Vec2): string | null {
@@ -480,11 +585,14 @@ export class GameController extends Component {
   private launch(id: string): void {
     const trace = this.game.beginSlide(id);
     if (!trace) return;
-    const points = trace.points.map((cell) => this.toLocal(cell));
+    const points = trace.points.map((cell) => {
+      const local = this.toLocal(cell);
+      return new Vec2(local.x, local.y);
+    });
     let length = 0;
     for (let i = 1; i < points.length; i++) length += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
     const duration = Math.max(0.12, length / 900);
-    this.anim = { id, points, duration: trace.result === "exit" ? duration : duration, elapsed: 0, bounce: trace.result !== "exit" };
+    this.anim = { id, points, duration, elapsed: 0, bounce: trace.result !== "exit" };
   }
 
   private stepAnim(dt: number): void {
@@ -495,6 +603,7 @@ export class GameController extends Component {
     const result = this.game.commitSlide();
     this.anim = null;
     this.layout();
+    if (result.firstBounce && this.game.bounceTip) this.flashToast(this.game.bounceTip);
     if (result.outcome === "win") {
       void this.settleWin();
       return;
@@ -517,7 +626,8 @@ export class GameController extends Component {
     const local = dist - index;
     const a = anim.points[index];
     const b = anim.points[index + 1] ?? a;
-    return new Vec2(a.x + (b.x - a.x) * local, a.y + (b.y - a.y) * local);
+    this.animPointOut.set(a.x + (b.x - a.x) * local, a.y + (b.y - a.y) * local);
+    return this.animPointOut;
   }
 
   private showStuckToast = (): void => {
@@ -540,53 +650,120 @@ export class GameController extends Component {
     this.toast.node.active = false;
   };
 
+  private setRestartEnabled(enabled: boolean): void {
+    this.restartEnabled = enabled;
+    if (!this.restartButton?.isValid) return;
+    const opacity = this.restartButton.getComponent(UIOpacity) ?? this.restartButton.addComponent(UIOpacity);
+    opacity.opacity = enabled ? 255 : 110;
+  }
+
+  /**
+   * 通关后约 0.8 秒才 advance。这段时间重开按钮关掉。
+   * 若仍然重开，先作废这一次结算，advance 看到 winReady 已清就返回 not-won。
+   */
   private async settleWin(): Promise<void> {
     if (this.settling) return;
     this.settling = true;
+    const token = ++this.settleToken;
+    this.setRestartEnabled(false);
     this.flashToast("完成");
-    await this.wait(0.8);
-    const decision = this.game.interstitialDecision();
-    if (decision.show) {
-      await this.playInterstitial();
-      this.game.markAdShown();
-    }
-    const next = this.game.advance();
-    this.settling = false;
-    this.hideToast();
-    this.layout();
-    if (next === "done") {
-      this.showModal("全部通过", "60 关都拔完了。", "再来一局", () => {
-        this.hideModal();
-        this.game.replayFromStart();
-        this.layout();
-      }, null, null);
+    try {
+      await this.wait(0.8);
+      if (!this.settleAlive(token)) return;
+      const decision = this.game.interstitialDecision();
+      if (decision.show) {
+        await this.playInterstitial();
+        if (!this.settleAlive(token)) return;
+        this.game.markAdShown();
+      }
+      if (!this.settleAlive(token)) return;
+      const next = this.game.advance();
+      if (next === "not-won") return;
+      this.hideToast();
+      this.layout();
+      if (next === "done") {
+        this.showModal("全部通过", "60 关都拔完了。", "再来一局", () => {
+          this.hideModal();
+          this.cancelPendingSettle();
+          this.game.replayFromStart();
+          this.layout();
+        }, null, null);
+      }
+    } finally {
+      if (token === this.settleToken) {
+        this.settling = false;
+        this.setRestartEnabled(true);
+      }
     }
   }
 
+  private settleAlive(token: number): boolean {
+    return token === this.settleToken && this.settling;
+  }
+
+  private cancelPendingSettle(): void {
+    this.settleToken += 1;
+    this.settling = false;
+    const wake = this.settleWait;
+    this.settleWait = null;
+    if (wake) {
+      this.unschedule(wake);
+      wake();
+    }
+    this.setRestartEnabled(true);
+  }
+
   private wait(seconds: number): Promise<void> {
-    return new Promise((resolve) => this.scheduleOnce(resolve, seconds));
+    return new Promise((resolve) => {
+      let settled = false;
+      const wake = () => {
+        if (settled) return;
+        settled = true;
+        if (this.settleWait === wake) this.settleWait = null;
+        resolve();
+      };
+      this.settleWait = wake;
+      this.scheduleOnce(wake, seconds);
+    });
+  }
+
+  private onRestart(): void {
+    if (this.settling || !this.restartEnabled) return;
+    this.cancelPendingSettle();
+    this.hideModal();
+    this.game.restart();
+    this.anim = null;
+    this.preview = null;
+    this.holdId = null;
+    this.armed = false;
+    this.activeTouch = null;
+    this.layout();
   }
 
   private openTimeout(): void {
     if (this.modal.active || this.settling) return;
+    this.showTimeoutModal();
+  }
+
+  private showTimeoutModal(): void {
+    if (this.game.reviveLeft <= 0) {
+      this.showModal("时间到了", "本关加时次数已用完", "重开", () => this.onRestart(), null, null);
+      return;
+    }
     this.showModal(
       "时间到了",
-      this.game.reviveLeft > 0 ? `还可以加时 ${this.game.reviveLeft} 次` : "本关加时次数已用完",
+      `还可以加时 ${this.game.reviveLeft} 次`,
       "加时 +20 秒",
       () => void this.onRevive(),
       "重开",
-      () => {
-        this.hideModal();
-        this.game.restart();
-        this.layout();
-      },
+      () => this.onRestart(),
     );
   }
 
   private async onRevive(): Promise<void> {
     const prepared = this.game.prepareRevive();
     if (prepared.action === "capped") {
-      this.flashToast("本关加时次数已用完");
+      this.showTimeoutModal();
       return;
     }
     if (prepared.action !== "need-ad") {
@@ -594,6 +771,7 @@ export class GameController extends Component {
       return;
     }
     const watched = await this.watchRewarded();
+    if (watched === "unavailable") return;
     const result = this.game.finishRevive(watched);
     if (!result.granted) {
       this.flashToast(result.reason === "not-ended" ? "需要看完才能获得" : "加时没有生效");
@@ -616,6 +794,7 @@ export class GameController extends Component {
       return;
     }
     const watched = await this.watchRewarded();
+    if (watched === "unavailable") return;
     const result = this.game.finishUndo(watched);
     if (!result.granted) this.flashToast(result.reason === "not-ended" ? "需要看完才能获得" : "撤销没有生效");
     this.layout();
@@ -637,6 +816,7 @@ export class GameController extends Component {
       return;
     }
     const watched = await this.watchRewarded();
+    if (watched === "unavailable") return;
     const result = this.game.finishHint(watched);
     if (!result.granted) this.flashToast(result.reason === "not-ended" ? "需要看完才能获得" : "提示没有生效");
   }
@@ -667,27 +847,32 @@ export class GameController extends Component {
     }
   }
 
-  private watchRewarded(): Promise<{ isEnded: boolean }> {
+  private watchRewarded(): Promise<{ isEnded: boolean } | "unavailable"> {
     return new Promise((resolve) => {
       void showRewarded().then((result) => {
-        if (result !== "no-wx") {
-          resolve(result);
+        if (result === "no-wx") {
+          this.showModal(
+            "模拟激励视频",
+            "当前不是微信环境。看完才发奖，中途关闭不发奖。",
+            "看完",
+            () => {
+              this.hideModal();
+              resolve({ isEnded: true });
+            },
+            "关闭",
+            () => {
+              this.hideModal();
+              resolve({ isEnded: false });
+            },
+          );
           return;
         }
-        this.showModal(
-          "模拟激励视频",
-          "当前不是微信环境。看完才发奖，中途关闭不发奖。",
-          "看完",
-          () => {
-            this.hideModal();
-            resolve({ isEnded: true });
-          },
-          "关闭",
-          () => {
-            this.hideModal();
-            resolve({ isEnded: false });
-          },
-        );
+        if (result.kind === "closed") {
+          resolve({ isEnded: result.isEnded });
+          return;
+        }
+        this.flashToast("广告暂时不能播放");
+        resolve("unavailable");
       });
     });
   }
@@ -695,7 +880,12 @@ export class GameController extends Component {
   private playInterstitial(): Promise<void> {
     return new Promise((resolve) => {
       void showInterstitial().then((result) => {
-        if (result === "shown" || result === "failed") {
+        if (result === "unconfigured" || result === "failed") {
+          this.flashToast("广告暂时不能播放");
+          resolve();
+          return;
+        }
+        if (result === "shown") {
           resolve();
           return;
         }

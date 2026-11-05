@@ -87,6 +87,7 @@ export class Game {
   private pending: PendingSlide | null = null;
   private pendingTimeout = false;
   private winReady = false;
+  private sawLevel2Bounce = false;
 
   constructor(
     private readonly bank: LevelBank,
@@ -127,10 +128,15 @@ export class Game {
   }
 
   get tutorialText(): string | null {
-    if (this.levelId === 1 && this.phase === "play" && this.undoStack.length === 0) {
-      return "顺着箭头的方向滑出去";
-    }
+    if (this.phase !== "play") return null;
+    if (this.levelId === 1 && this.undoStack.length === 0) return "顺着箭头的方向滑出去";
+    if (this.levelId === 2) return "挡路的要先拔";
     return null;
+  }
+
+  /** 第 2 关第一次弹回时闪一下，接着仍显示 tutorialText。 */
+  get bounceTip(): string | null {
+    return this.levelId === 2 ? "被挡住了，先拔前面的" : null;
   }
 
   get tutorialLocked(): boolean {
@@ -159,7 +165,7 @@ export class Game {
     return trace;
   }
 
-  commitSlide(): { outcome: "exit" | "bounce" | "win"; stuck: boolean } {
+  commitSlide(): { outcome: "exit" | "bounce" | "win"; stuck: boolean; firstBounce: boolean } {
     if (!this.pending) throw new Error("no slide");
     const { id, trace } = this.pending;
     this.pending = null;
@@ -175,10 +181,15 @@ export class Game {
         this.winReady = true;
         this.pendingTimeout = false;
         this.consecutiveClears += 1;
-        return { outcome: "win", stuck: false };
+        return { outcome: "win", stuck: false, firstBounce: false };
       }
     } else {
       this.stuck = !this.remaining.some((a) => traceArrow(this.level, this.remaining, a.id).result === "exit");
+    }
+    let firstBounce = false;
+    if (trace.result !== "exit" && this.levelId === 2 && !this.sawLevel2Bounce) {
+      this.sawLevel2Bounce = true;
+      firstBounce = true;
     }
     if (this.pendingTimeout || this.timeLeft === 0) {
       this.phase = "timeout";
@@ -186,7 +197,11 @@ export class Game {
     } else {
       this.phase = "play";
     }
-    return { outcome: trace.result === "exit" ? "exit" : "bounce", stuck: this.stuck };
+    return {
+      outcome: trace.result === "exit" ? "exit" : "bounce",
+      stuck: this.stuck,
+      firstBounce,
+    };
   }
 
   tick(dt: number): { timedOut: boolean } {
@@ -232,7 +247,7 @@ export class Game {
     return { action: "need-ad", arrowId };
   }
 
-  finishHint(result: { isEnded?: boolean } | null): FinishResult {
+  finishHint(result: { isEnded?: boolean; failed?: boolean } | null): FinishResult {
     const prepared = this.prepareHint();
     if (prepared.action === "free" && prepared.arrowId) {
       this.freeHints -= 1;
@@ -244,6 +259,7 @@ export class Game {
     if (prepared.action !== "need-ad" || !prepared.arrowId) {
       return { granted: false, reason: prepared.action };
     }
+    if (result?.failed) return { granted: false, reason: "playback-error" };
     this.markAdShown();
     if (!rewardGranted(result)) return { granted: false, reason: "not-ended" };
     this.hintsUsed += 1;
@@ -262,7 +278,7 @@ export class Game {
     return { action: "need-ad" };
   }
 
-  finishUndo(result: { isEnded?: boolean } | null): FinishResult {
+  finishUndo(result: { isEnded?: boolean; failed?: boolean } | null): FinishResult {
     const prepared = this.prepareUndo();
     if (prepared.action === "free") {
       this.undoFreeLeft -= 1;
@@ -270,6 +286,7 @@ export class Game {
       return { granted: true };
     }
     if (prepared.action !== "need-ad") return { granted: false, reason: prepared.action };
+    if (result?.failed) return { granted: false, reason: "playback-error" };
     this.markAdShown();
     if (!rewardGranted(result)) return { granted: false, reason: "not-ended" };
     this.undoPaidLeft -= 1;
@@ -286,9 +303,10 @@ export class Game {
     return { action: "need-ad" };
   }
 
-  finishRevive(result: { isEnded?: boolean } | null): FinishResult {
+  finishRevive(result: { isEnded?: boolean; failed?: boolean } | null): FinishResult {
     const prepared = this.prepareRevive();
     if (prepared.action !== "need-ad") return { granted: false, reason: prepared.action };
+    if (result?.failed) return { granted: false, reason: "playback-error" };
     this.markAdShown();
     if (!rewardGranted(result)) return { granted: false, reason: "not-ended" };
     this.reviveLeft -= 1;
@@ -318,9 +336,12 @@ export class Game {
     this.lastAdAtMs = this.now();
   }
 
-  /** 结算插屏决策之后再进入下一关，避免棋盘先于广告出现。 */
-  advance(): "next" | "done" {
-    if (!this.winReady) throw new Error("not won");
+  /**
+   * 结算插屏决策之后再进入下一关，避免棋盘先于广告出现。
+   * 重开会清掉 winReady。这时返回 not-won，而不是抛错。
+   */
+  advance(): "next" | "done" | "not-won" {
+    if (!this.winReady) return "not-won";
     this.winReady = false;
     if (this.levelId >= this.bank.maxId) {
       this.phase = "cleared";
@@ -383,6 +404,7 @@ export class Game {
     this.timeLimit = timeLimitSeconds(this.levelId, this.level.arrows.length);
     this.timeLeft = this.timeLimit;
     this.phase = "play";
+    this.sawLevel2Bounce = false;
     this.persist();
   }
 

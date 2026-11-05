@@ -1,0 +1,11 @@
+{
+  "description": "不是 Cocos Creator 构建产物。见 BUILD_GAP.md。请在 Windows 或 macOS 上用 Creator 3.8.6 重新构建并覆盖本目录。",
+  "compileType": "game",
+  "appid": "touristappid",
+  "projectname": "arrow-pull-minigame",
+  "setting": {
+    "urlCheck": false,
+    "es6": true,
+    "minified": false
+  }
+}

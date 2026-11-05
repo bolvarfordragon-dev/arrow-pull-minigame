@@ -1,14 +1,10 @@
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync } from "node:fs";
-import path from "node:path";
 import test from "node:test";
 import { arrowCountForLevel, generateAll, generateLevel } from "../assets/scripts/core/generate";
 import { traceArrow } from "../assets/scripts/core/trace";
 import type { Level } from "../assets/scripts/core/types";
 import { LEVEL_COUNT } from "../assets/scripts/core/types";
 import { validateLevel } from "../assets/scripts/core/validate";
-
-const LEVEL_DIR = path.join(process.cwd(), "assets/resources/levels");
 
 function band(levelId: number): [number, number] {
   if (levelId === 2) return [2, 2];
@@ -19,23 +15,18 @@ function band(levelId: number): [number, number] {
   return [7, 12];
 }
 
-function readPacked(): Level[] {
-  const files = readdirSync(LEVEL_DIR)
-    .filter((name) => name.endsWith(".json"))
-    .sort();
-  return files.map((name) => JSON.parse(readFileSync(path.join(LEVEL_DIR, name), "utf8")) as Level);
+function bodyOf(level: Level): string {
+  return JSON.stringify({ lines: level.lines, arrows: level.arrows, solution: level.solution });
 }
 
-test("60 levels are generated, saved, and solved by their standard solution", () => {
+test("60 levels are generated and solved by their standard solution", () => {
   const generated = generateAll();
   assert.equal(generated.length, LEVEL_COUNT);
-  const packed = readPacked();
-  assert.equal(packed.length, LEVEL_COUNT);
   let crossings = 0;
   for (let id = 1; id <= LEVEL_COUNT; id++) {
     const level = generateLevel(id);
     assert.equal(level.id, id);
-    assert.deepEqual(packed[id - 1], level);
+    assert.deepEqual(generated[id - 1], level);
     const checked = validateLevel(level);
     assert.equal(checked.ok, true, `${id}: ${checked.errors.join(",")}`);
     const [lo, hi] = band(id);
@@ -45,6 +36,30 @@ test("60 levels are generated, saved, and solved by their standard solution", ()
     if (axes.has("H") && axes.has("V")) crossings += 1;
   }
   assert.ok(crossings >= 40, `expected most levels to cross, got ${crossings}`);
+});
+
+test("no two levels are identical except id", () => {
+  const seen = new Map<string, number>();
+  for (const level of generateAll()) {
+    const body = bodyOf(level);
+    const previous = seen.get(body);
+    assert.equal(previous, undefined, `level ${level.id} duplicates level ${previous}`);
+    seen.set(body, level.id);
+  }
+});
+
+test("level 10 crosses tracks on the way into the timed levels", () => {
+  const level = generateLevel(10);
+  const six = generateLevel(6);
+  const axes = new Set(level.lines.map((line) => line.axis));
+  assert.ok(axes.has("H") && axes.has("V"));
+  assert.notEqual(bodyOf(level), bodyOf(six));
+  assert.equal(traceArrow(level, level.arrows, "a1").result, "exit");
+  assert.equal(traceArrow(level, level.arrows, "a2").blockerId, "a1");
+  const down = traceArrow(level, level.arrows, "a3");
+  assert.equal(down.result, "arrow");
+  assert.equal(down.blockerId, "a2");
+  assert.equal(validateLevel(level).ok, true);
 });
 
 test("level 1 previews a clear exit and level 2 teaches a block", () => {

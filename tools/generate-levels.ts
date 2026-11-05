@@ -1,28 +1,27 @@
-import { mkdirSync, writeFileSync } from "node:fs";
-import path from "node:path";
-import { fileURLToPath } from "node:url";
 import { generateAll } from "../assets/scripts/core/generate";
-import type { Level } from "../assets/scripts/core/types";
+import { validateLevel } from "../assets/scripts/core/validate";
 
-const root = path.join(path.dirname(fileURLToPath(import.meta.url)), "..");
-const levelDir = path.join(root, "assets/resources/levels");
-const packPath = path.join(root, "assets/scripts/core/level-pack.ts");
-
-function json(level: Level): string {
-  return `${JSON.stringify(level, null, 2)}\n`;
-}
-
+/**
+ * 关卡只有一份：assets/scripts/core/generate.ts。
+ * 运行时调用 generateAll()，不再把同一份数据写进 level-pack.ts 和 resources/levels。
+ */
 const levels = generateAll();
-mkdirSync(levelDir, { recursive: true });
+const seen = new Map<string, number>();
+let failed = false;
 for (const level of levels) {
-  const name = `level-${String(level.id).padStart(2, "0")}.json`;
-  writeFileSync(path.join(levelDir, name), json(level));
+  const checked = validateLevel(level);
+  if (!checked.ok) {
+    console.error(`level ${level.id} invalid: ${checked.errors.join(",")}`);
+    failed = true;
+  }
+  const body = JSON.stringify({ lines: level.lines, arrows: level.arrows, solution: level.solution });
+  const previous = seen.get(body);
+  if (previous != null) {
+    console.error(`level ${level.id} duplicates level ${previous}`);
+    failed = true;
+  } else {
+    seen.set(body, level.id);
+  }
 }
-
-const pack = `import type { Level } from "./types";
-
-/** 由 tools/generate-levels.ts 生成，与 assets/resources/levels 内容一致。 */
-export const LEVEL_PACK: readonly Level[] = ${JSON.stringify(levels, null, 2)};
-`;
-writeFileSync(packPath, pack);
-console.log(`wrote ${levels.length} levels`);
+if (failed) process.exit(1);
+console.log(`${levels.length} levels ok. Source is generate.ts; no level-pack or JSON copy is written.`);
