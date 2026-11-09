@@ -18,6 +18,7 @@ import {
 } from "cc";
 import { Game, type PrepareResult } from "./core/game";
 import { generateAll } from "./core/generate";
+import { layoutPuzzle } from "./core/layout";
 import { safeAreaInsets, withMenuButton, type EdgeInsets, type MenuButtonRect } from "./core/safe-area";
 import { lineCells } from "./core/trace";
 import type { ArrowDef, Cell, Dir, LevelBank, Trace } from "./core/types";
@@ -34,6 +35,9 @@ const BUTTON = new Color(38, 44, 60, 255);
 const DIM = new Color(6, 8, 14, 188);
 const GHOST = new Color(242, 193, 78, 90);
 const PREVIEW_COLOR = ACCENT.clone();
+const TOKEN = new Color(44, 52, 70, 255);
+const TOKEN_HOT = new Color(78, 62, 34, 255);
+const TOKEN_RIM = new Color(186, 196, 214, 255);
 
 const DIR_VECTOR: Record<Dir, Vec2> = {
   E: new Vec2(1, 0),
@@ -81,8 +85,14 @@ export class GameController extends Component {
   private title!: Label;
   private timer!: Label;
   private toast!: Label;
+  private undoButton!: Node;
   private hintButton!: Node;
   private restartButton!: Node;
+  private screenWidth: number | null = null;
+  private hitRadius = 48;
+  private armDistance = 36;
+  private tokenRadius = 28;
+  private trackWidth = 10;
   private restartEnabled = true;
   private modal!: Node;
   private modalTitle!: Label;
@@ -181,11 +191,13 @@ export class GameController extends Component {
     this.title = this.makeLabel("Title", 40, INK);
     this.timer = this.makeLabel("Timer", 32, ACCENT);
     this.toast = this.makeLabel("Toast", 28, INK);
+    this.toast.verticalAlign = Label.VerticalAlign.TOP;
     this.toast.node.active = false;
 
     const undo = this.makeButton("Undo", "撤销", 150);
     const hint = this.makeButton("Hint", "提示", 150);
     const restart = this.makeButton("Restart", "重开", 150);
+    this.undoButton = undo;
     this.hintButton = hint;
     this.restartButton = restart;
     restart.addComponent(UIOpacity);
@@ -245,12 +257,36 @@ export class GameController extends Component {
   private paintButton(g: Graphics, width: number, height: number): void {
     g.clear();
     g.fillColor = BUTTON;
-    g.roundRect(-width / 2, -height / 2, width, height, 14);
+    const radius = Math.min(18, height * 0.28);
+    g.roundRect(-width / 2, -height / 2, width, height, radius);
     g.fill();
     g.strokeColor = ACCENT;
     g.lineWidth = 2;
-    g.roundRect(-width / 2, -height / 2, width, height, 14);
+    g.roundRect(-width / 2, -height / 2, width, height, radius);
     g.stroke();
+  }
+
+  private applyLabel(label: Label, box: { x: number; y: number; width: number; height: number }, font: number): void {
+    const size = Math.round(font);
+    label.fontSize = size;
+    label.lineHeight = size + 8;
+    const ui = label.node.getComponent(UITransform)!;
+    ui.setContentSize(box.width, box.height);
+    label.node.setPosition(box.x, box.y, 0);
+  }
+
+  private applyButton(node: Node, box: { x: number; y: number; width: number; height: number }, font: number): void {
+    node.setPosition(box.x, box.y, 0);
+    const ui = node.getComponent(UITransform)!;
+    ui.setContentSize(box.width, box.height);
+    const graphics = node.getComponent(Graphics);
+    if (graphics) this.paintButton(graphics, box.width, box.height);
+    const label = node.getComponentInChildren(Label);
+    if (!label) return;
+    const size = Math.round(font);
+    label.fontSize = size;
+    label.lineHeight = size + 6;
+    label.node.getComponent(UITransform)!.setContentSize(box.width, box.height);
   }
 
   private readInsets(size: { width: number; height: number }): EdgeInsets {
@@ -271,7 +307,10 @@ export class GameController extends Component {
         // 胶囊坐标相对屏幕左上角，优先用屏幕宽高，没有再退回窗口宽高。
         const width = info?.screenWidth || info?.windowWidth || 0;
         const height = info?.screenHeight || info?.windowHeight || 0;
-        if (width > 0 && height > 0) screen = { width, height };
+        if (width > 0 && height > 0) {
+          screen = { width, height };
+          this.screenWidth = width;
+        }
       }
     } catch {
       menu = null;
@@ -282,33 +321,45 @@ export class GameController extends Component {
 
   private layout(): void {
     const size = view.getVisibleSize();
+    if (size.width < 2 || size.height < 2) return;
     const insets = this.readInsets(size);
     const cam = this.node.getChildByName("Camera")?.getComponent(Camera);
     if (cam) cam.orthoHeight = size.height / 2;
     const boardUi = this.board.getComponent(UITransform)!;
     boardUi.setContentSize(size.width, size.height);
-    const shiftX = (insets.left - insets.right) / 2;
-    this.board.setPosition(shiftX, 0, 0);
 
     const bounds = this.gridBounds();
     const spanX = Math.max(1, bounds.maxX - bounds.minX + 1);
     const spanY = Math.max(1, bounds.maxY - bounds.minY + 1);
-    const usableW = Math.max(1, size.width - insets.left - insets.right);
-    const usableH = Math.max(1, size.height - insets.top - insets.bottom);
-    this.cellSize = Math.min(92, (usableW * 0.84) / spanX, (usableH * 0.52) / spanY);
+    const metrics = layoutPuzzle({
+      visible: { width: size.width, height: size.height },
+      insets,
+      spanX,
+      spanY,
+      showTimer: this.game.timeLeft != null,
+      showHint: this.game.hintVisible,
+      screenWidth: this.screenWidth ?? undefined,
+    });
+    this.cellSize = metrics.cellSize;
+    this.hitRadius = metrics.hitRadius;
+    this.armDistance = metrics.armDistance;
+    this.tokenRadius = metrics.tokenRadius;
+    this.trackWidth = metrics.trackWidth;
     this.originX = (bounds.minX + bounds.maxX) / 2;
     this.originY = (bounds.minY + bounds.maxY) / 2;
-    this.boardShiftY = size.height * 0.04 + (insets.bottom - insets.top) / 2;
+    this.boardShiftY = metrics.boardShiftY;
+    this.board.setPosition(metrics.shiftX, 0, 0);
 
-    this.title.node.setPosition(shiftX, size.height / 2 - 78 - insets.top, 0);
-    this.timer.node.setPosition(shiftX, size.height / 2 - 128 - insets.top, 0);
-    this.toast.node.setPosition(shiftX, -size.height / 2 + 210 + insets.bottom, 0);
-    const y = -size.height / 2 + 96 + insets.bottom;
-    const gap = Math.min(180, usableW * 0.24);
-    this.node.getChildByName("Undo")?.setPosition(shiftX - gap, y, 0);
-    this.hintButton.setPosition(shiftX, y, 0);
-    this.restartButton.setPosition(shiftX + gap, y, 0);
-    this.hintButton.active = this.game.hintVisible;
+    this.applyLabel(this.title, metrics.title, metrics.fonts.title);
+    if (metrics.timer) this.applyLabel(this.timer, metrics.timer, metrics.fonts.timer);
+    this.applyLabel(this.toast, metrics.instruction, metrics.fonts.instruction);
+    const buttonFont = metrics.fonts.button;
+    for (let i = 0; i < metrics.buttonNames.length; i++) {
+      const name = metrics.buttonNames[i];
+      const box = metrics.buttons[i];
+      const node = name === "undo" ? this.undoButton : name === "hint" ? this.hintButton : this.restartButton;
+      this.applyButton(node, box, buttonFont);
+    }
 
     const modalUi = this.modal.getComponent(UITransform)!;
     modalUi.setContentSize(size.width, size.height);
@@ -318,10 +369,10 @@ export class GameController extends Component {
     dim.fillColor = DIM;
     dim.rect(-size.width / 2, -size.height / 2, size.width, size.height);
     dim.fill();
-    this.modalTitle.node.setPosition(0, 70, 0);
-    this.modalBody.node.setPosition(0, 10, 0);
-    this.modalA.setPosition(0, -70, 0);
-    this.modalB.setPosition(0, -150, 0);
+    this.applyLabel(this.modalTitle, metrics.modalTitle, metrics.fonts.modalTitle);
+    this.applyLabel(this.modalBody, metrics.modalBody, metrics.fonts.modalBody);
+    this.applyButton(this.modalA, metrics.modalPrimary, buttonFont);
+    this.applyButton(this.modalB, metrics.modalSecondary, buttonFont);
     this.syncHud();
   }
 
@@ -416,7 +467,7 @@ export class GameController extends Component {
       const line = this.game.lines[lineIndex];
       if (!line || cells.length === 0) continue;
       g.strokeColor = PATH;
-      g.lineWidth = Math.max(8, this.cellSize * 0.16);
+      g.lineWidth = this.trackWidth;
       const first = this.toLocal(cells[0]);
       g.moveTo(first.x, first.y);
       for (let i = 1; i < cells.length; i++) {
@@ -451,9 +502,9 @@ export class GameController extends Component {
     const dy = tip.y - inward.y;
     if (dx === 0 && dy === 0) return;
     const p = this.toLocal(tip);
-    const len = this.cellSize * 0.28;
+    const len = this.cellSize * 0.22;
     g.strokeColor = ACCENT;
-    g.lineWidth = 3;
+    g.lineWidth = Math.max(2, this.cellSize * 0.04);
     g.moveTo(p.x, p.y);
     g.lineTo(p.x + dx * len, p.y + dy * len);
     g.stroke();
@@ -464,8 +515,8 @@ export class GameController extends Component {
     const alpha = trace.result === "exit" ? 230 : Math.round(140 + 100 * Math.abs(Math.sin(this.blink * 8)));
     PREVIEW_COLOR.a = alpha;
     g.strokeColor = PREVIEW_COLOR;
-    g.lineWidth = 4;
-    const dash = Math.max(10, this.cellSize * 0.22);
+    g.lineWidth = Math.max(3, this.cellSize * 0.06);
+    const dash = Math.max(8, this.cellSize * 0.2);
     const gap = dash * 0.65;
     for (let i = 0; i < points.length - 1; i++) {
       const a = points[i];
@@ -493,22 +544,30 @@ export class GameController extends Component {
 
   private drawArrow(g: Graphics, x: number, y: number, dir: Dir, scale: number, hot: boolean): void {
     const d = dirVector(dir);
-    const color = hot ? ACCENT : INK;
-    const len = this.cellSize * 0.34 * scale;
-    const head = this.cellSize * 0.2 * scale;
-    g.strokeColor = color;
-    g.lineWidth = hot ? 7 : 5;
-    g.moveTo(x - d.x * len * 0.35, y - d.y * len * 0.35);
-    g.lineTo(x + d.x * len, y + d.y * len);
+    const radius = Math.max(8, this.tokenRadius * scale);
+    g.fillColor = hot ? TOKEN_HOT : TOKEN;
+    g.circle(x, y, radius);
+    g.fill();
+    g.strokeColor = hot ? ACCENT : TOKEN_RIM;
+    g.lineWidth = Math.max(2, radius * 0.14);
+    g.circle(x, y, radius);
+    g.stroke();
+    const len = radius * 1.35;
+    const head = radius * 0.78;
+    const ink = hot ? ACCENT : INK;
+    g.strokeColor = ink;
+    g.lineWidth = Math.max(3, radius * 0.32);
+    g.moveTo(x - d.x * len * 0.2, y - d.y * len * 0.2);
+    g.lineTo(x + d.x * len * 0.72, y + d.y * len * 0.72);
     g.stroke();
     const px = -d.y;
     const py = d.x;
     const tipX = x + d.x * len;
     const tipY = y + d.y * len;
-    g.fillColor = color;
+    g.fillColor = ink;
     g.moveTo(tipX, tipY);
-    g.lineTo(tipX - d.x * head + px * head * 0.55, tipY - d.y * head + py * head * 0.55);
-    g.lineTo(tipX - d.x * head - px * head * 0.55, tipY - d.y * head - py * head * 0.55);
+    g.lineTo(tipX - d.x * head + px * head * 0.58, tipY - d.y * head + py * head * 0.58);
+    g.lineTo(tipX - d.x * head - px * head * 0.58, tipY - d.y * head - py * head * 0.58);
     g.close();
     g.fill();
   }
@@ -520,7 +579,7 @@ export class GameController extends Component {
     const x = origin.x + d.x * this.cellSize * 0.55 * t;
     const y = origin.y + d.y * this.cellSize * 0.55 * t;
     g.fillColor = GHOST;
-    g.circle(x, y, this.cellSize * 0.14);
+    g.circle(x, y, Math.max(8, this.tokenRadius * 0.55));
     g.fill();
   }
 
@@ -545,7 +604,7 @@ export class GameController extends Component {
     const point = this.touchPoint(event);
     const d = dirVector(arrow.dir);
     const along = (point.x - this.holdStart.x) * d.x + (point.y - this.holdStart.y) * d.y;
-    this.armed = along > Math.max(28, this.cellSize * 0.38);
+    this.armed = along > this.armDistance;
   }
 
   private onTouchEnd(event: EventTouch): void {
@@ -570,7 +629,7 @@ export class GameController extends Component {
 
   private pickArrow(point: Vec2): string | null {
     let best: string | null = null;
-    let bestDist = this.cellSize * 0.55;
+    let bestDist = this.hitRadius;
     for (const arrow of this.game.arrows) {
       const p = this.toLocal(arrow);
       const dist = Math.hypot(p.x - point.x, p.y - point.y);
