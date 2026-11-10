@@ -1,129 +1,71 @@
 import type { ArrowDef, Cell, Dir, Level, LineDef } from "./types";
 import { LEVEL_COUNT } from "./types";
-import { cellKey, locateArrow, traceArrow } from "./trace";
+import { cellKey, dirSign, lineCells, locateArrow } from "./trace";
 import { validateLevel } from "./validate";
 
-export function arrowCountForLevel(levelId: number): number {
-  if (levelId <= 0) throw new Error(`bad level ${levelId}`);
-  // 第 2 关按首局脚本放两只箭，用来教阻挡和弹回。第 1、3 关仍是一只。
-  if (levelId === 1 || levelId === 3) return 1;
-  if (levelId === 2) return 2;
-  if (levelId <= 5) return 2;
-  if (levelId <= 10) return 3;
-  if (levelId <= 25) return 3 + ((levelId - 11) % 3);
-  if (levelId <= 45) return 5 + ((levelId - 26) % 4);
-  return 7 + ((levelId - 46) % 6);
+type Blueprint = readonly [arrows: number, rows: number, columns: number, variant: number];
+
+// 第 1–5 关手工教学。其余关卡固定筛选过的布局，不在进游戏时反复试种子。
+const CAMPAIGN: readonly Blueprint[] = [
+  // 6–10
+  [4, 2, 1, 0], [4, 1, 2, 0], [5, 2, 2, 235], [5, 2, 2, 45], [6, 2, 2, 31],
+  // 11–20
+  [6, 2, 2, 115], [7, 2, 2, 736], [8, 3, 2, 155], [7, 2, 3, 12], [8, 3, 2, 1223],
+  [8, 2, 3, 157], [9, 3, 2, 745], [8, 2, 3, 32], [9, 3, 3, 1697], [9, 3, 3, 303],
+  // 21–30
+  [9, 3, 2, 119], [10, 3, 3, 139], [10, 3, 3, 4248], [11, 3, 3, 737], [10, 2, 3, 38],
+  [11, 3, 3, 767], [11, 4, 3, 170], [12, 3, 3, 155], [11, 3, 3, 21], [12, 4, 3, 1329],
+  // 31–40
+  [12, 3, 3, 154], [13, 4, 3, 5256], [13, 3, 4, 12352], [12, 3, 3, 389], [13, 4, 3, 189],
+  [14, 3, 4, 5266], [14, 4, 3, 10682], [13, 3, 3, 825], [14, 4, 4, 821], [15, 4, 4, 7150],
+  // 41–50
+  [14, 4, 3, 73], [15, 3, 4, 12981], [15, 4, 4, 1050], [16, 4, 4, 1289], [15, 4, 3, 701],
+  [16, 4, 4, 2687], [16, 4, 4, 1581], [17, 4, 4, 380], [16, 4, 4, 287], [17, 4, 4, 20169],
+  // 51–60
+  [16, 4, 4, 103], [17, 4, 4, 4659], [18, 4, 5, 7679], [17, 4, 4, 624], [18, 5, 4, 526],
+  [18, 4, 5, 27669], [19, 5, 4, 82909], [18, 4, 4, 384], [19, 4, 5, 9903], [20, 5, 4, 134666],
+];
+
+function rail(axis: LineDef["axis"], fixed: number, start: number, end: number, exitStart: boolean, exitEnd: boolean): LineDef {
+  return { axis, fixed, start, end, exitStart, exitEnd };
 }
 
-function line(axis: LineDef["axis"], fixed: number, start: number, end: number, exitStart: boolean, exitEnd: boolean): LineDef {
-  return { axis, fixed, start, end, exitStart, exitEnd: exitEnd || !exitStart };
+function fromPlacements(id: number, lines: LineDef[], placements: readonly (readonly [number, number, Dir])[]): Level {
+  const arrows = placements.map(([x, y, dir], i) => ({ id: `a${i + 1}`, x, y, dir }));
+  return { id, lines, arrows, solution: arrows.map(arrow => arrow.id) };
 }
 
-function handcrafted(levelId: number): Level | null {
-  switch (levelId) {
+function tutorial(id: number): Level | null {
+  switch (id) {
     case 1:
-      return {
-        id: 1,
-        lines: [line("H", 0, 0, 3, false, true)],
-        arrows: [{ id: "a1", x: 1, y: 0, dir: "E" }],
-        solution: ["a1"],
-      };
+      return fromPlacements(id, [rail("H", 0, 0, 3, false, true)], [[1, 0, "E"]]);
     case 2:
-      return {
-        id: 2,
-        lines: [line("H", 0, 0, 4, false, true)],
-        arrows: [
-          { id: "a1", x: 2, y: 0, dir: "E" },
-          { id: "a2", x: 0, y: 0, dir: "E" },
-        ],
-        solution: ["a1", "a2"],
-      };
+      return fromPlacements(id, [rail("H", 0, 0, 4, false, true)], [[2, 0, "E"], [0, 0, "E"]]);
     case 3:
-      return {
-        id: 3,
-        lines: [line("V", 1, 0, 3, false, true)],
-        arrows: [{ id: "a1", x: 1, y: 1, dir: "N" }],
-        solution: ["a1"],
-      };
+      // 同一条轨道可以有两个出口，读箭头自己的方向。
+      return fromPlacements(id, [rail("V", 0, 0, 5, true, true)], [[0, 4, "N"], [0, 1, "S"]]);
     case 4:
-      return {
-        id: 4,
-        lines: [line("V", 0, 0, 4, false, true)],
-        arrows: [
-          { id: "a1", x: 0, y: 3, dir: "N" },
-          { id: "a2", x: 0, y: 1, dir: "N" },
-        ],
-        solution: ["a1", "a2"],
-      };
+      return fromPlacements(id, [
+        rail("H", 2, 0, 5, false, true), rail("V", 2, 0, 3, false, true),
+      ], [[2, 2, "E"], [2, 1, "N"]]);
     case 5:
-      return {
-        id: 5,
-        lines: [line("H", 1, 0, 4, false, true), line("V", 2, 0, 4, false, true)],
-        arrows: [
-          { id: "a1", x: 2, y: 1, dir: "E" },
-          { id: "a2", x: 2, y: 0, dir: "N" },
-        ],
-        solution: ["a1", "a2"],
-      };
-    case 6:
-      return {
-        id: 6,
-        lines: [line("H", 0, 0, 6, false, true)],
-        arrows: [
-          { id: "a1", x: 5, y: 0, dir: "E" },
-          { id: "a2", x: 3, y: 0, dir: "E" },
-          { id: "a3", x: 1, y: 0, dir: "E" },
-        ],
-        solution: ["a1", "a2", "a3"],
-      };
-    case 7:
-      return {
-        id: 7,
-        lines: [line("H", 0, 0, 6, false, true), line("V", 4, 0, 4, true, true)],
-        arrows: [
-          { id: "a1", x: 4, y: 0, dir: "E" },
-          { id: "a2", x: 2, y: 0, dir: "E" },
-          { id: "a3", x: 4, y: 3, dir: "S" },
-        ],
-        solution: ["a1", "a2", "a3"],
-      };
-    case 8:
-      return {
-        id: 8,
-        lines: [line("H", 1, 0, 7, false, true), line("V", 5, 0, 4, true, false)],
-        arrows: [
-          { id: "a1", x: 5, y: 1, dir: "E" },
-          { id: "a2", x: 2, y: 1, dir: "E" },
-          { id: "a3", x: 5, y: 4, dir: "S" },
-        ],
-        solution: ["a1", "a2", "a3"],
-      };
-    case 9:
-      return {
-        id: 9,
-        lines: [line("H", 0, 0, 5, true, true), line("H", 2, 0, 5, false, true)],
-        arrows: [
-          { id: "a1", x: 1, y: 0, dir: "W" },
-          { id: "a2", x: 4, y: 0, dir: "E" },
-          { id: "a3", x: 2, y: 0, dir: "E" },
-        ],
-        solution: ["a2", "a3", "a1"],
-      };
-    case 10:
-      // 限时关之前的十字路口：横轨上的箭占着交叉点，竖轨要等它让开。
-      return {
-        id: 10,
-        lines: [line("H", 1, 0, 6, false, true), line("V", 3, 0, 4, true, true)],
-        arrows: [
-          { id: "a1", x: 5, y: 1, dir: "E" },
-          { id: "a2", x: 3, y: 1, dir: "E" },
-          { id: "a3", x: 3, y: 3, dir: "S" },
-        ],
-        solution: ["a1", "a2", "a3"],
-      };
+      // 拔掉交叉点上的横箭，横、竖两支同时解锁。
+      return fromPlacements(id, [
+        rail("H", 2, 0, 6, false, true), rail("V", 3, 0, 5, false, true),
+      ], [[3, 2, "E"], [1, 2, "E"], [3, 1, "N"]]);
     default:
       return null;
   }
+}
+
+function blueprintFor(id: number): Blueprint {
+  const blueprint = CAMPAIGN[id - 6];
+  if (!blueprint) throw new Error(`bad level ${id}`);
+  return blueprint;
+}
+
+export function arrowCountForLevel(id: number): number {
+  return tutorial(id)?.arrows.length ?? blueprintFor(id)[0];
 }
 
 function mulberry32(seed: number): () => number {
@@ -136,160 +78,119 @@ function mulberry32(seed: number): () => number {
   };
 }
 
+function buildRails(rows: number, cols: number, random: () => number): LineDef[] {
+  const width = Math.max(7, cols + 5);
+  const height = Math.max(7, rows + 5);
+  function parallel(axis: LineDef["axis"], count: number, length: number, across: number): LineDef[] {
+    return Array.from({ length: count }, (_, i) => {
+      const fixed = Math.round(((i + 1) * (across - 1)) / (count + 1));
+      const start = Math.floor(random() * 3);
+      const end = length - 1 - Math.floor(random() * 3);
+      const exits = random();
+      return rail(axis, fixed, start, end, exits < 0.67, exits >= 0.33);
+    });
+  }
+  return [...parallel("H", rows, width, height), ...parallel("V", cols, height, width)];
+}
+
 interface Candidate {
-  x: number;
-  y: number;
+  cell: Cell;
+  key: string;
   dir: Dir;
-  ray: Cell[];
+  railIndex: number;
+  path: readonly string[];
 }
 
-function dirOf(axis: LineDef["axis"], sign: 1 | -1): Dir {
-  if (axis === "H") return sign > 0 ? "E" : "W";
-  return sign > 0 ? "N" : "S";
-}
-
-function candidatesOn(lines: LineDef[], occupied: Set<string>): Candidate[] {
-  const level: Level = { id: 0, lines, arrows: [], solution: [] };
-  const found: Candidate[] = [];
-  for (const lineDef of lines) {
-    const lo = lineDef.start;
-    const hi = lineDef.end;
-    const coords: Cell[] = [];
-    if (lineDef.axis === "H") {
-      for (let x = lo; x <= hi; x++) coords.push({ x, y: lineDef.fixed });
-    } else {
-      for (let y = lo; y <= hi; y++) coords.push({ x: lineDef.fixed, y });
-    }
-    for (const sign of [1, -1] as const) {
-      const open = sign < 0 ? lineDef.exitStart : lineDef.exitEnd;
-      if (!open) continue;
-      for (let index = 0; index < coords.length; index++) {
-        const cell = coords[index];
-        if (occupied.has(cellKey(cell.x, cell.y))) continue;
-        const ray: Cell[] = [];
-        let blocked = false;
-        for (let i = index + sign; i >= 0 && i < coords.length; i += sign) {
-          const step = coords[i];
-          if (occupied.has(cellKey(step.x, step.y))) {
-            blocked = true;
-            break;
-          }
-          ray.push(step);
-        }
-        if (blocked) continue;
-        const dir = dirOf(lineDef.axis, sign);
-        const arrow: ArrowDef = { id: "_", x: cell.x, y: cell.y, dir };
-        if (!locateArrow(level, arrow)) continue;
-        found.push({ x: cell.x, y: cell.y, dir, ray });
+function candidatesOn(lines: LineDef[]): Candidate[] {
+  return lines.flatMap((line, railIndex) => {
+    const cells = lineCells(line);
+    const keys = cells.map(cell => cellKey(cell.x, cell.y));
+    return cells.flatMap((cell, i) => {
+      const key = keys[i];
+      const candidates: Candidate[] = [];
+      if (line.exitStart && i > 0) {
+        candidates.push({ cell, key, dir: line.axis === "H" ? "W" : "S", railIndex, path: keys.slice(0, i) });
       }
-    }
-  }
-  return found;
+      if (line.exitEnd && i < cells.length - 1) {
+        candidates.push({ cell, key, dir: line.axis === "H" ? "E" : "N", railIndex, path: keys.slice(i + 1) });
+      }
+      return candidates;
+    });
+  });
 }
 
-function place(lines: LineDef[], count: number, rng: () => number): Level | null {
-  const occupied = new Set<string>();
-  const placed: ArrowDef[] = [];
-  const rays = new Map<string, Cell[]>();
-  for (let n = count; n >= 1; n--) {
-    let pool = candidatesOn(lines, occupied);
-    if (pool.length === 0) return null;
-    if (placed.length === 0) {
-      const long = pool.filter((c) => c.ray.length >= 1);
-      if (long.length === 0) return null;
-      const max = Math.max(...long.map((c) => c.ray.length));
-      pool = long.filter((c) => c.ray.length >= max - 1);
-    } else {
-      const blocking = pool.filter((c) =>
-        placed.some((arrow) => rays.get(arrow.id)?.some((cell) => cell.x === c.x && cell.y === c.y)),
-      );
-      if (blocking.length === 0) return null;
-      pool = blocking;
-    }
-    const choice = pool[Math.floor(rng() * pool.length)];
-    const id = `a${n}`;
-    placed.push({ id, x: choice.x, y: choice.y, dir: choice.dir });
-    rays.set(id, choice.ray);
-    occupied.add(cellKey(choice.x, choice.y));
-  }
-  const arrows = placed.slice().sort((a, b) => Number(a.id.slice(1)) - Number(b.id.slice(1)));
-  const solution = arrows.map((a) => a.id);
-  return { id: 0, lines, arrows, solution };
-}
-
-function buildLines(levelId: number, attempt: number): LineDef[] {
-  const rng = mulberry32(levelId * 1000 + attempt * 17 + 3);
-  const tier = levelId <= 25 ? 1 : levelId <= 45 ? 2 : 3;
-  const rows = tier === 1 ? 2 : tier === 2 ? 3 : 3 + (attempt % 2);
-  const cols = tier === 1 ? 1 + (levelId % 2) : tier === 2 ? 2 : 2 + (levelId % 2);
-  const hLen = 5 + tier + (levelId % 3) + (attempt % 3);
-  const lines: LineDef[] = [];
-  for (let r = 0; r < rows; r++) {
-    const exitStart = rng() > 0.62;
-    lines.push(line("H", r * 2, 0, hLen - 1, exitStart, true));
-  }
-  const vEnd = (rows - 1) * 2;
-  for (let c = 0; c < cols; c++) {
-    const x = 1 + c * 2;
-    if (x >= hLen - 1) continue;
-    const exitStart = rng() > 0.45;
-    lines.push(line("V", x, 0, Math.max(2, vEnd), exitStart, true));
-  }
-  return lines;
-}
-
-function singleLine(levelId: number, count: number): Level {
-  const end = count;
-  const arrows: ArrowDef[] = [];
-  for (let i = 1; i <= count; i++) {
-    arrows.push({ id: `a${i}`, x: end - (i - 1), y: 0, dir: "E" });
-  }
-  return {
-    id: levelId,
-    lines: [line("H", 0, 0, end, false, true)],
-    arrows,
-    solution: arrows.map((a) => a.id),
-  };
-}
-
-function hasDependency(level: Level): boolean {
-  if (level.arrows.length < 2) return true;
-  let exits = 0;
+function trimRails(level: Level): LineDef[] {
+  const riders = new Map<LineDef, ArrowDef[]>();
   for (const arrow of level.arrows) {
-    if (traceArrow(level, level.arrows, arrow.id).result === "exit") exits++;
+    const line = locateArrow(level, arrow)?.line;
+    if (!line) throw new Error(`off-rail arrow in level ${level.id}: ${arrow.id}`);
+    const onLine = riders.get(line) ?? [];
+    onLine.push(arrow);
+    riders.set(line, onLine);
   }
-  return exits >= 1 && exits < level.arrows.length;
+  return level.lines.map(line => {
+    const arrows = riders.get(line);
+    if (!arrows) throw new Error(`unused rail in level ${level.id}`);
+    const positions = arrows.map(arrow => line.axis === "H" ? arrow.x : arrow.y);
+    const exitStart = arrows.some(arrow => dirSign(arrow.dir) < 0);
+    const exitEnd = arrows.some(arrow => dirSign(arrow.dir) > 0);
+    const start = exitStart ? line.start : Math.max(line.start, Math.min(...positions) - 1);
+    const end = exitEnd ? line.end : Math.min(line.end, Math.max(...positions) + 1);
+    return { ...line, start, end, exitStart, exitEnd };
+  });
 }
 
-export function generateLevel(levelId: number): Level {
-  const handmade = handcrafted(levelId);
-  if (handmade) {
-    const checked = validateLevel(handmade);
-    if (!checked.ok) throw new Error(`handcrafted ${levelId}: ${checked.errors.join(",")}`);
-    return handmade;
+function assemble(id: number, [count, rows, cols, variant]: Blueprint): Level | null {
+  const random = mulberry32(id * 1009 + variant * 9176);
+  const lines = buildRails(rows, cols, random);
+  const candidates = candidatesOn(lines);
+  const occupied = new Set<string>();
+  const used = new Set<number>();
+  const tailDepth = new Map<string, number>();
+  const placed: Candidate[] = [];
+
+  // 从最后一支倒放。每支新箭都会挡住已放好的某支，形成相连的阻挡网。
+  while (placed.length < count) {
+    const mustFillRail = count - placed.length === lines.length - used.size;
+    const choices: { candidate: Candidate; weight: number; depth: number }[] = [];
+    let total = 0;
+    for (const candidate of candidates) {
+      const onUsedRail = used.has(candidate.railIndex);
+      if (mustFillRail && onUsedRail) continue;
+      if (occupied.has(candidate.key) || candidate.path.some(key => occupied.has(key))) continue;
+      const blockedDepth = tailDepth.get(candidate.key) ?? 0;
+      if (placed.length && !blockedDepth) continue;
+      const weight = (onUsedRail ? 2 : 7) + Math.min(6, blockedDepth);
+      choices.push({ candidate, weight, depth: blockedDepth + 1 });
+      total += weight;
+    }
+    if (!choices.length) return null;
+
+    let ticket = random() * total;
+    const pick = choices.find(choice => (ticket -= choice.weight) < 0) ?? choices[choices.length - 1];
+    const { candidate, depth } = pick;
+    placed.push(candidate);
+    occupied.add(candidate.key);
+    used.add(candidate.railIndex);
+    for (const key of candidate.path) {
+      tailDepth.set(key, Math.max(depth, tailDepth.get(key) ?? 0));
+    }
   }
-  const count = arrowCountForLevel(levelId);
-  for (let attempt = 0; attempt < 48; attempt++) {
-    const lines = buildLines(levelId, attempt);
-    const rng = mulberry32(levelId * 9176 + attempt * 131 + 9);
-    const placed = place(lines, count, rng);
-    if (!placed) continue;
-    placed.id = levelId;
-    const checked = validateLevel(placed);
-    if (!checked.ok) continue;
-    if (!hasDependency(placed)) continue;
-    const bothAxes = placed.lines.some((l) => l.axis === "H") && placed.lines.some((l) => l.axis === "V");
-    if (!bothAxes) continue;
-    return placed;
-  }
-  const fallback = singleLine(levelId, count);
-  const checked = validateLevel(fallback);
-  if (!checked.ok) throw new Error(`fallback ${levelId}: ${checked.errors.join(",")}`);
-  return fallback;
+
+  const placements = placed.reverse().map(({ cell, dir }) => [cell.x, cell.y, dir] as const);
+  const level = fromPlacements(id, lines, placements);
+  level.lines = trimRails(level);
+  return level;
+}
+
+export function generateLevel(id: number): Level {
+  const level = tutorial(id) ?? assemble(id, blueprintFor(id));
+  if (!level) throw new Error(`could not assemble level ${id}`);
+  const checked = validateLevel(level);
+  if (!checked.ok) throw new Error(`level ${id}: ${checked.errors.join(",")}`);
+  return level;
 }
 
 export function generateAll(): Level[] {
-  const levels: Level[] = [];
-  for (let id = 1; id <= LEVEL_COUNT; id++) levels.push(generateLevel(id));
-  return levels;
+  return Array.from({ length: LEVEL_COUNT }, (_, i) => generateLevel(i + 1));
 }

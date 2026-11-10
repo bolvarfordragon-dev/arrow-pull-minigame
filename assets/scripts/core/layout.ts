@@ -23,6 +23,7 @@ export interface PuzzleLayoutInput {
   spanY: number;
   showTimer: boolean;
   showHint: boolean;
+  showGuide?: boolean;
   /**
    * 可见宽度对应的屏幕宽度（pt 或 CSS 像素）。
    * 有的话，按钮至少按 46pt 来，避免高分辨率上点击区域太小。
@@ -43,6 +44,7 @@ export interface PuzzleLayout {
   timer: Box | null;
   instruction: Box;
   board: Box;
+  table: Box;
   buttons: Box[];
   buttonNames: Array<"undo" | "hint" | "restart">;
   modalTitle: Box;
@@ -128,8 +130,9 @@ export function layoutPuzzle(input: PuzzleLayoutInput): PuzzleLayout {
   const sidePad = Math.max(16, width * 0.045);
   const availableW = Math.max(48, width - insets.left - insets.right - sidePad * 2);
 
-  const topBlock = insets.top + 8 + titleH + (input.showTimer ? 8 + timerH : 0) + 18;
-  const buttonPad = 14;
+  const titlePad = 18;
+  const topBlock = insets.top + titlePad + titleH + (input.showTimer ? 8 + timerH : 0) + 18;
+  const buttonPad = 24;
   const instructionGap = 16;
   const bottomBlock = insets.bottom + buttonPad + buttonH + 12 + instructionH + instructionGap;
   const availableH = Math.max(48, height - topBlock - bottomBlock);
@@ -141,7 +144,7 @@ export function layoutPuzzle(input: PuzzleLayoutInput): PuzzleLayout {
   const boardW = spanUnits(spanX) * cellSize;
   const boardH = spanUnits(spanY) * cellSize;
 
-  const titleY = height / 2 - insets.top - 8 - titleH / 2;
+  const titleY = height / 2 - insets.top - titlePad - titleH / 2;
   const timerY = input.showTimer ? titleY - titleH / 2 - 8 - timerH / 2 : 0;
   const titleBottom = input.showTimer ? timerY - timerH / 2 : titleY - titleH / 2;
   const buttonY = -height / 2 + insets.bottom + buttonPad + buttonH / 2;
@@ -151,6 +154,12 @@ export function layoutPuzzle(input: PuzzleLayoutInput): PuzzleLayout {
   const maxCenter = titleBottom - 18 - boardH / 2;
   const boardShiftY = (minCenter + maxCenter) / 2;
   const instructionY = boardShiftY - boardH / 2 - instructionGap - instructionH / 2;
+  const framePad = clamp(width * 0.032, 14, 26);
+  const tableTop = Math.min(titleBottom - 8, boardShiftY + boardH / 2 + (input.showGuide ? framePad * 2.2 : framePad));
+  const tableBottom = Math.max(
+    buttonTop + 6,
+    input.showGuide ? instructionY - instructionH / 2 - 6 : boardShiftY - boardH / 2 - framePad,
+  );
 
   const names: Array<"undo" | "hint" | "restart"> = input.showHint ? ["undo", "hint", "restart"] : ["undo", "restart"];
   const gap = Math.max(12, width * 0.03);
@@ -178,7 +187,7 @@ export function layoutPuzzle(input: PuzzleLayoutInput): PuzzleLayout {
     hitRadius: cellSize * HIT_FRACTION,
     armDistance: Math.max(cellSize * 0.34, width * 0.045),
     tokenRadius,
-    trackWidth: Math.max(6, cellSize * 0.15),
+    trackWidth: clamp(cellSize * 0.1, 5, 16),
     fonts: {
       title: titleFont,
       timer: timerFont,
@@ -191,6 +200,7 @@ export function layoutPuzzle(input: PuzzleLayoutInput): PuzzleLayout {
     timer: input.showTimer ? { x: shiftX, y: timerY, width: textW, height: timerH } : null,
     instruction: { x: shiftX, y: instructionY, width: textW, height: instructionH },
     board: { x: shiftX, y: boardShiftY, width: boardW, height: boardH },
+    table: { x: shiftX, y: (tableTop + tableBottom) / 2, width: availableW + sidePad, height: tableTop - tableBottom },
     buttons: buttons.map(({ x, y, width: w, height: h }) => ({ x, y, width: w, height: h })),
     buttonNames: names,
     modalTitle: { x: 0, y: modalPrimaryY + modalButtonH + 78, width: textW, height: modalTitleFont + 16 },

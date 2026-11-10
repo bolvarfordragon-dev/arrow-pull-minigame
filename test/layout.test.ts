@@ -14,6 +14,7 @@ import {
 } from "../assets/scripts/core/layout";
 import { withMenuButton, type EdgeInsets, type MenuButtonRect } from "../assets/scripts/core/safe-area";
 import { lineCells } from "../assets/scripts/core/trace";
+import { LEVEL_COUNT } from "../assets/scripts/core/types";
 import type { Level } from "../assets/scripts/core/types";
 
 interface Phone {
@@ -49,7 +50,7 @@ const PHONES: Phone[] = [
   { name: "tall browser frame", screen: { width: 746, height: 1546 }, safe: { top: 0, bottom: 0, left: 0, right: 0 }, raw: true },
 ];
 
-const LEVELS = [1, 2, 7, 10, 50, 60];
+const LEVELS = Array.from({ length: LEVEL_COUNT }, (_, i) => i + 1);
 
 function spanOf(level: Level): { spanX: number; spanY: number } {
   let minX = Infinity;
@@ -89,6 +90,7 @@ function layoutFor(phone: Phone, levelId: number): { layout: PuzzleLayout; visib
     spanY: span.spanY,
     showTimer: levelId >= 11,
     showHint: levelId >= 6,
+    showGuide: levelId <= 2,
     screenWidth: phone.screen.width,
   });
   return { layout, visible, insets, ...span };
@@ -128,6 +130,7 @@ test("layout stays inside the safe playfield on phones, sparse levels, and dense
       const where = `${phone.name} level ${levelId}`;
       assert.ok(layout.cellSize > 8, where);
       assert.ok(insideHorizontal(layout.board, visible, insets), `${where} board x`);
+      assert.ok(insideHorizontal(layout.table, visible, insets), `${where} table x`);
       assert.ok(insideHorizontal(layout.title, visible, insets), `${where} title x`);
       assert.ok(insideHorizontal(layout.instruction, visible, insets), `${where} instruction x`);
       for (const button of layout.buttons) assert.ok(insideHorizontal(button, visible, insets), `${where} button x`);
@@ -137,6 +140,10 @@ test("layout stays inside the safe playfield on phones, sparse levels, and dense
         assert.ok(boxBottom(button) >= -visible.height / 2 + insets.bottom - 0.6, `${where} button above home indicator`);
       }
       const upper = layout.timer ?? layout.title;
+      assert.ok(gapAbove(upper, layout.table) >= 6, `${where} table clears title/timer`);
+      assert.ok(gapAbove(layout.table, layout.buttons[0]) >= 6, `${where} table clears buttons`);
+      assert.ok(boxTop(layout.table) > boxTop(layout.board) && boxBottom(layout.table) < boxBottom(layout.board), `${where} table contains board`);
+      if (levelId <= 2) assert.ok(boxBottom(layout.table) <= boxBottom(layout.instruction), `${where} table contains tutorial`);
       assert.ok(gapAbove(upper, layout.board) >= 8, `${where} title/timer clears board ${gapAbove(upper, layout.board)}`);
       assert.ok(gapAbove(layout.board, layout.instruction) >= 8, `${where} board clears instruction`);
       assert.ok(gapAbove(layout.instruction, layout.buttons[0]) >= 8, `${where} instruction clears buttons`);

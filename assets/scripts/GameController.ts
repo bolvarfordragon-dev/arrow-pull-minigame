@@ -5,6 +5,8 @@ import {
   Color,
   Component,
   EventTouch,
+  game as cocosGame,
+  Game as CocosGame,
   Graphics,
   Label,
   Layers,
@@ -18,7 +20,7 @@ import {
 } from "cc";
 import { Game, type PrepareResult } from "./core/game";
 import { generateAll } from "./core/generate";
-import { layoutPuzzle } from "./core/layout";
+import { layoutPuzzle, type Box } from "./core/layout";
 import { safeAreaInsets, withMenuButton, type EdgeInsets, type MenuButtonRect } from "./core/safe-area";
 import { lineCells } from "./core/trace";
 import type { ArrowDef, Cell, Dir, LevelBank, Trace } from "./core/types";
@@ -26,18 +28,42 @@ import { showInterstitial, showRewarded } from "./WxAds";
 
 const { ccclass } = _decorator;
 
-const PATH = new Color(198, 208, 220, 255);
-const ACCENT = new Color(242, 193, 78, 255);
-const INK = new Color(244, 246, 250, 255);
-const MUTED = new Color(154, 162, 178, 255);
-const DANGER = new Color(232, 112, 96, 255);
-const BUTTON = new Color(38, 44, 60, 255);
-const DIM = new Color(6, 8, 14, 188);
-const GHOST = new Color(242, 193, 78, 90);
-const PREVIEW_COLOR = ACCENT.clone();
-const TOKEN = new Color(44, 52, 70, 255);
-const TOKEN_HOT = new Color(78, 62, 34, 255);
-const TOKEN_RIM = new Color(186, 196, 214, 255);
+const TABLE = {
+  backdrop: new Color(255, 249, 233, 255),
+  cloud: new Color(253, 235, 193, 255),
+  mint: new Color(226, 243, 231, 255),
+  shadow: new Color(117, 79, 45, 58),
+  base: new Color(188, 100, 71, 255),
+  edge: new Color(248, 172, 124, 255),
+  face: new Color(255, 238, 204, 255),
+  bevel: new Color(221, 153, 106, 255),
+  grain: new Color(180, 126, 83, 56),
+  groove: new Color(229, 197, 153, 255),
+  rail: new Color(147, 117, 87, 255),
+  stop: new Color(140, 82, 62, 255),
+};
+const ACCENT = new Color(158, 89, 6, 255);
+const OPEN = new Color(12, 119, 99, 255);
+const INK = new Color(38, 58, 67, 255);
+const GUIDE_INK = new Color(85, 61, 44, 255);
+const MUTED = new Color(97, 83, 71, 255);
+const DANGER = new Color(187, 51, 62, 255);
+const BUTTON = new Color(255, 252, 240, 255);
+const BUTTON_HINT = new Color(209, 241, 217, 255);
+const BUTTON_RIM = new Color(197, 154, 113, 255);
+const BUTTON_HINT_RIM = new Color(109, 158, 126, 255);
+const DIM = new Color(61, 44, 38, 136);
+const GHOST = new Color(12, 119, 99, 137);
+const TOKEN = new Color(29, 132, 166, 255);
+const TOKEN_SELECTED = new Color(17, 129, 108, 255);
+const TOKEN_HOT = new Color(255, 205, 98, 255);
+const TOKEN_RIM = new Color(16, 76, 100, 255);
+const TOKEN_INNER = new Color(255, 252, 240, 112);
+const TOKEN_ARROW = new Color(255, 252, 240, 255);
+const TOKEN_HOT_INK = new Color(101, 54, 17, 255);
+const EXIT_PULSE = OPEN.clone();
+const EXIT_MARK_LENGTH = 0.22;
+const EXIT_PULSE_TIME = 0.5;
 
 const DIR_VECTOR: Record<Dir, Vec2> = {
   E: new Vec2(1, 0),
@@ -47,12 +73,12 @@ const DIR_VECTOR: Record<Dir, Vec2> = {
 };
 
 interface Anim {
-  id: string;
-  points: Vec2[];
+  trace: Trace;
   duration: number;
   elapsed: number;
-  bounce: boolean;
 }
+
+type ButtonIcon = "undo" | "hint" | "restart";
 
 interface WxWindowInfo {
   windowWidth?: number;
@@ -81,6 +107,8 @@ function dirVector(dir: Dir): Vec2 {
 export class GameController extends Component {
   private game!: Game;
   private board!: Node;
+  private backdrop!: Graphics;
+  private table!: Graphics;
   private gfx!: Graphics;
   private title!: Label;
   private timer!: Label;
@@ -109,12 +137,12 @@ export class GameController extends Component {
   private originY = 0;
   private boardShiftY = 30;
   private anim: Anim | null = null;
+  private exitPulse: { trace: Trace; elapsed: number } | null = null;
   private preview: Trace | null = null;
   private holdId: string | null = null;
   private holdStart = new Vec2();
   private armed = false;
   private activeTouch: number | null = null;
-  private blink = 0;
   private settling = false;
   private settleToken = 0;
   private settleWait: (() => void) | null = null;
@@ -124,6 +152,7 @@ export class GameController extends Component {
   private cachedLines: Cell[][] = [];
   private coordCache = new Map<string, Vec2>();
   private coordStamp = "";
+  private readonly traceEndOut = new Vec2();
   private readonly animPointOut = new Vec2();
   private readonly touchUi = new Vec2();
   private readonly touchWorld = new Vec3();
@@ -152,8 +181,12 @@ export class GameController extends Component {
     this.board.on(Node.EventType.TOUCH_START, this.onTouchStart, this);
     this.board.on(Node.EventType.TOUCH_MOVE, this.onTouchMove, this);
     this.board.on(Node.EventType.TOUCH_END, this.onTouchEnd, this);
-    this.board.on(Node.EventType.TOUCH_CANCEL, this.onTouchEnd, this);
-    view.setResizeCallback(() => this.layout());
+    this.board.on(Node.EventType.TOUCH_CANCEL, this.onTouchCancel, this);
+    cocosGame.on(CocosGame.EVENT_HIDE, this.clearTouch, this);
+    view.setResizeCallback(() => {
+      this.clearTouch();
+      this.layout();
+    });
   }
 
   start(): void {
@@ -163,17 +196,21 @@ export class GameController extends Component {
 
   onDestroy(): void {
     this.cancelPendingSettle();
+    cocosGame.off(CocosGame.EVENT_HIDE, this.clearTouch, this);
     view.setResizeCallback(() => undefined);
   }
 
   update(dt: number): void {
-    this.blink += dt;
     this.ghost += dt;
     const tick = this.game.tick(dt);
     if (tick.timedOut) this.openTimeout();
+    if (this.exitPulse) {
+      this.exitPulse.elapsed += dt;
+      if (this.exitPulse.elapsed >= EXIT_PULSE_TIME) this.exitPulse = null;
+    }
     if (this.anim) this.stepAnim(dt);
-    // 静止棋盘不每帧清掉重画。预览闪烁、滑行和第一关虚影才需要连帧。
-    const motion = this.anim != null || this.preview != null || this.showsGhost();
+    // 底盘单独绘制，滑行、通关亮灯和新手虚影只刷新前景。
+    const motion = this.anim != null || this.exitPulse != null || this.showsGhost();
     const fingerprint = motion ? null : this.boardFingerprint();
     if (motion || fingerprint !== this.drawnFingerprint) {
       this.redraw();
@@ -183,14 +220,25 @@ export class GameController extends Component {
   }
 
   private buildUi(): void {
+    const backdropNode = uiNode("Backdrop");
+    backdropNode.addComponent(UITransform);
+    this.node.addChild(backdropNode);
+    this.backdrop = backdropNode.addComponent(Graphics);
+
+    const tableNode = uiNode("Table");
+    tableNode.addComponent(UITransform);
+    this.node.addChild(tableNode);
+    this.table = tableNode.addComponent(Graphics);
+
     this.board = uiNode("Board");
     this.board.addComponent(UITransform);
     this.node.addChild(this.board);
     this.gfx = this.board.addComponent(Graphics);
 
     this.title = this.makeLabel("Title", 40, INK);
-    this.timer = this.makeLabel("Timer", 32, ACCENT);
-    this.toast = this.makeLabel("Toast", 28, INK);
+    this.title.isBold = true;
+    this.timer = this.makeLabel("Timer", 32, GUIDE_INK);
+    this.toast = this.makeLabel("Toast", 28, GUIDE_INK);
     this.toast.verticalAlign = Label.VerticalAlign.TOP;
     this.toast.node.active = false;
 
@@ -212,6 +260,7 @@ export class GameController extends Component {
     this.modal.addComponent(Graphics);
     this.node.addChild(this.modal);
     this.modalTitle = this.makeLabel("ModalTitle", 36, INK, this.modal);
+    this.modalTitle.isBold = true;
     this.modalBody = this.makeLabel("ModalBody", 26, MUTED, this.modal);
     this.modalA = this.makeButton("ModalA", "确定", 220, this.modal);
     this.modalB = this.makeButton("ModalB", "取消", 220, this.modal);
@@ -248,22 +297,55 @@ export class GameController extends Component {
     const g = node.addComponent(Graphics);
     this.paintButton(g, width, 68);
     const label = this.makeLabel(`${name}Label`, 26, INK, node);
+    label.isBold = true;
     label.string = text;
     label.node.getComponent(UITransform)!.setContentSize(width, 68);
     label.node.setPosition(0, 0, 0);
     return node;
   }
 
-  private paintButton(g: Graphics, width: number, height: number): void {
+  private paintButton(g: Graphics, width: number, height: number, icon?: ButtonIcon, font = 26, primary = false): void {
     g.clear();
-    g.fillColor = BUTTON;
-    const radius = Math.min(18, height * 0.28);
+    const radius = Math.min(32, height * 0.36);
+    const highlight = primary || icon === "hint";
+    const rim = highlight ? BUTTON_HINT_RIM : BUTTON_RIM;
+    g.fillColor = rim;
+    g.roundRect(-width / 2, -height / 2 - 5, width, height, radius);
+    g.fill();
+    g.fillColor = highlight ? BUTTON_HINT : BUTTON;
     g.roundRect(-width / 2, -height / 2, width, height, radius);
     g.fill();
-    g.strokeColor = ACCENT;
+    g.strokeColor = rim;
     g.lineWidth = 2;
     g.roundRect(-width / 2, -height / 2, width, height, radius);
     g.stroke();
+    if (icon) this.drawButtonIcon(g, icon, -font * 1.06, font * 0.88);
+  }
+
+  private drawButtonIcon(g: Graphics, icon: ButtonIcon, x: number, size: number): void {
+    const r = size * 0.42;
+    g.lineWidth = Math.max(3.5, size * 0.15);
+    g.lineCap = Graphics.LineCap.ROUND;
+    g.lineJoin = Graphics.LineJoin.ROUND;
+    g.strokeColor = INK;
+    if (icon === "hint") {
+      this.drawSpark(g, x, 0, r * 1.24, OPEN);
+    } else if (icon === "undo") {
+      g.moveTo(x + r, -r * 0.55);
+      g.bezierCurveTo(x + r, r * 0.45, x + r * 0.55, r * 0.63, x - r, r * 0.63);
+      g.moveTo(x - r * 0.38, r * 1.18);
+      g.lineTo(x - r, r * 0.63);
+      g.lineTo(x - r * 0.38, r * 0.09);
+      g.stroke();
+    } else {
+      g.moveTo(x + r * 0.72, r * 0.57);
+      g.bezierCurveTo(x - r * 0.4, r * 1.55, x - r * 1.45, r * 0.32, x - r * 0.83, -r * 0.55);
+      g.bezierCurveTo(x - r * 0.3, -r * 1.33, x + r * 0.96, -r * 0.96, x + r * 0.96, -r * 0.13);
+      g.moveTo(x + r * 0.8, r * 1.11);
+      g.lineTo(x + r * 0.8, r * 0.51);
+      g.lineTo(x + r * 0.23, r * 0.46);
+      g.stroke();
+    }
   }
 
   private applyLabel(label: Label, box: { x: number; y: number; width: number; height: number }, font: number): void {
@@ -275,18 +357,19 @@ export class GameController extends Component {
     label.node.setPosition(box.x, box.y, 0);
   }
 
-  private applyButton(node: Node, box: { x: number; y: number; width: number; height: number }, font: number): void {
+  private applyButton(node: Node, box: Box, font: number, icon?: ButtonIcon): void {
     node.setPosition(box.x, box.y, 0);
     const ui = node.getComponent(UITransform)!;
     ui.setContentSize(box.width, box.height);
     const graphics = node.getComponent(Graphics);
-    if (graphics) this.paintButton(graphics, box.width, box.height);
+    if (graphics) this.paintButton(graphics, box.width, box.height, icon, font, node === this.modalA);
     const label = node.getComponentInChildren(Label);
     if (!label) return;
     const size = Math.round(font);
     label.fontSize = size;
     label.lineHeight = size + 6;
     label.node.getComponent(UITransform)!.setContentSize(box.width, box.height);
+    label.node.setPosition(icon ? size * 0.55 : 0, 0, 0);
   }
 
   private readInsets(size: { width: number; height: number }): EdgeInsets {
@@ -324,7 +407,10 @@ export class GameController extends Component {
     if (size.width < 2 || size.height < 2) return;
     const insets = this.readInsets(size);
     const cam = this.node.getChildByName("Camera")?.getComponent(Camera);
-    if (cam) cam.orthoHeight = size.height / 2;
+    if (cam) {
+      cam.orthoHeight = size.height / 2;
+      cam.clearColor = TABLE.backdrop;
+    }
     const boardUi = this.board.getComponent(UITransform)!;
     boardUi.setContentSize(size.width, size.height);
 
@@ -338,18 +424,24 @@ export class GameController extends Component {
       spanY,
       showTimer: this.game.timeLeft != null,
       showHint: this.game.hintVisible,
+      showGuide: this.game.levelId <= 2,
       screenWidth: this.screenWidth ?? undefined,
     });
     this.cellSize = metrics.cellSize;
     this.hitRadius = metrics.hitRadius;
     this.armDistance = metrics.armDistance;
-    this.tokenRadius = metrics.tokenRadius;
+    this.tokenRadius = Math.max(8, metrics.tokenRadius);
     this.trackWidth = metrics.trackWidth;
     this.originX = (bounds.minX + bounds.maxX) / 2;
     this.originY = (bounds.minY + bounds.maxY) / 2;
     this.boardShiftY = metrics.boardShiftY;
     this.board.setPosition(metrics.shiftX, 0, 0);
+    this.table.node.setPosition(metrics.table.x, 0, 0);
+    this.table.getComponent(UITransform)!.setContentSize(size.width, size.height);
+    this.paintTable(metrics.table);
 
+    this.backdrop.getComponent(UITransform)!.setContentSize(size.width, size.height);
+    this.paintBackdrop(size, metrics.title, metrics.fonts.title);
     this.applyLabel(this.title, metrics.title, metrics.fonts.title);
     if (metrics.timer) this.applyLabel(this.timer, metrics.timer, metrics.fonts.timer);
     this.applyLabel(this.toast, metrics.instruction, metrics.fonts.instruction);
@@ -358,7 +450,7 @@ export class GameController extends Component {
       const name = metrics.buttonNames[i];
       const box = metrics.buttons[i];
       const node = name === "undo" ? this.undoButton : name === "hint" ? this.hintButton : this.restartButton;
-      this.applyButton(node, box, buttonFont);
+      this.applyButton(node, box, buttonFont, name);
     }
 
     const modalUi = this.modal.getComponent(UITransform)!;
@@ -369,6 +461,16 @@ export class GameController extends Component {
     dim.fillColor = DIM;
     dim.rect(-size.width / 2, -size.height / 2, size.width, size.height);
     dim.fill();
+    const panelWidth = metrics.modalTitle.width + 14;
+    const panelTop = metrics.modalTitle.y + metrics.modalTitle.height / 2 + 24;
+    const panelBottom = metrics.modalSecondary.y - metrics.modalSecondary.height / 2 - 22;
+    dim.fillColor = BUTTON;
+    dim.roundRect(-panelWidth / 2, panelBottom, panelWidth, panelTop - panelBottom, 36);
+    dim.fill();
+    dim.strokeColor = BUTTON_RIM;
+    dim.lineWidth = 3;
+    dim.roundRect(-panelWidth / 2, panelBottom, panelWidth, panelTop - panelBottom, 36);
+    dim.stroke();
     this.applyLabel(this.modalTitle, metrics.modalTitle, metrics.fonts.modalTitle);
     this.applyLabel(this.modalBody, metrics.modalBody, metrics.fonts.modalBody);
     this.applyButton(this.modalA, metrics.modalPrimary, buttonFont);
@@ -429,13 +531,14 @@ export class GameController extends Component {
       String(this.boardShiftY),
       this.game.highlightId ?? "",
       this.holdId ?? "",
+      this.armed ? "armed" : "",
     ];
     for (const arrow of this.game.arrows) parts.push(arrow.id, String(arrow.x), String(arrow.y), arrow.dir);
     return parts.join(",");
   }
 
   private showsGhost(): boolean {
-    return this.game.levelId === 1 && this.game.phase === "play" && !this.anim && this.game.arrows.length === 1;
+    return this.game.levelId === 1 && this.game.phase === "play" && !this.holdId && !this.anim && this.game.arrows.length === 1;
   }
 
   private syncHud(): void {
@@ -446,7 +549,7 @@ export class GameController extends Component {
     } else {
       this.timer.node.active = true;
       this.timer.string = `${Math.ceil(this.game.timeLeft)} 秒`;
-      this.timer.color = this.game.warnTime ? DANGER : ACCENT;
+      this.timer.color = this.game.warnTime ? DANGER : GUIDE_INK;
     }
     const guide = this.game.tutorialText;
     if (guide && !this.toast.node.active) {
@@ -456,109 +559,224 @@ export class GameController extends Component {
     this.hintButton.active = this.game.hintVisible && !this.modal.active;
   }
 
+  private drawSpark(g: Graphics, x: number, y: number, r: number, color: Color): void {
+    const waist = r * 0.27;
+    g.fillColor = color;
+    g.moveTo(x, y + r);
+    g.lineTo(x + waist, y + waist);
+    g.lineTo(x + r, y);
+    g.lineTo(x + waist, y - waist);
+    g.lineTo(x, y - r);
+    g.lineTo(x - waist, y - waist);
+    g.lineTo(x - r, y);
+    g.lineTo(x - waist, y + waist);
+    g.close();
+    g.fill();
+  }
+
+  private paintBackdrop(size: { width: number; height: number }, title: Box, titleFont: number): void {
+    const g = this.backdrop;
+    g.clear();
+    g.fillColor = TABLE.cloud;
+    g.circle(-size.width * 0.56, size.height * 0.26, size.width * 0.24);
+    g.fill();
+    g.fillColor = TABLE.mint;
+    g.circle(size.width * 0.55, -size.height * 0.27, size.width * 0.25);
+    g.fill();
+    this.drawSpark(g, size.width * 0.33, size.height * 0.27, 13, TABLE.cloud);
+    this.drawSpark(g, -size.width * 0.32, -size.height * 0.26, 12, TABLE.mint);
+
+    const width = Math.min(title.width, titleFont * 5.3);
+    const height = title.height + 8;
+    const left = title.x - width / 2;
+    const bottom = title.y - height / 2;
+    g.fillColor = TABLE.shadow;
+    g.roundRect(left, bottom - 5, width, height, height / 2);
+    g.fill();
+    g.fillColor = BUTTON;
+    g.roundRect(left, bottom, width, height, height / 2);
+    g.fill();
+    g.strokeColor = BUTTON_RIM;
+    g.lineWidth = 2;
+    g.roundRect(left, bottom, width, height, height / 2);
+    g.stroke();
+  }
+
+  private paintTable(box: Box): void {
+    const g = this.table;
+    g.clear();
+    const left = -box.width / 2;
+    const bottom = box.y - box.height / 2;
+    const corner = Math.min(48, box.height * 0.25);
+    g.fillColor = TABLE.shadow;
+    g.roundRect(left, bottom - 5, box.width, box.height, corner);
+    g.fill();
+    g.fillColor = TABLE.base;
+    g.roundRect(left, bottom, box.width, box.height, corner);
+    g.fill();
+    g.fillColor = TABLE.edge;
+    g.roundRect(left, bottom + 8, box.width, box.height - 8, corner);
+    g.fill();
+    g.strokeColor = TABLE.base;
+    g.lineWidth = 3;
+    g.roundRect(left, bottom + 8, box.width, box.height - 8, corner);
+    g.stroke();
+    g.fillColor = TABLE.face;
+    g.roundRect(left + 11, bottom + 20, box.width - 22, box.height - 31, corner - 8);
+    g.fill();
+    g.strokeColor = TABLE.bevel;
+    g.lineWidth = 2.5;
+    g.roundRect(left + 11, bottom + 20, box.width - 22, box.height - 31, corner - 8);
+    g.stroke();
+
+    g.fillColor = TABLE.grain;
+    for (let y = bottom + 37; y < bottom + box.height - 31; y += 28) {
+      for (let x = left + 35; x < -left - 34; x += 28) g.circle(x, y, 1.8);
+    }
+    g.fill();
+
+    g.lineCap = Graphics.LineCap.ROUND;
+    const cached = this.levelLineCells();
+    // 先画所有轨道的凹槽，再画槽内线，交叉处不会把另一条轨道切断。
+    for (const [color, width] of [[TABLE.groove, this.trackWidth + 7], [TABLE.rail, this.trackWidth]] as const) {
+      g.strokeColor = color;
+      g.lineWidth = width;
+      for (const cells of cached) {
+        if (cells.length < 2) continue;
+        const start = this.toLocal(cells[0]);
+        const end = this.toLocal(cells[cells.length - 1]);
+        g.moveTo(start.x, start.y);
+        g.lineTo(end.x, end.y);
+      }
+      g.stroke();
+    }
+    for (let lineIndex = 0; lineIndex < cached.length; lineIndex++) {
+      const cells = cached[lineIndex];
+      const line = this.game.lines[lineIndex];
+      if (!line || cells.length < 2) continue;
+      this.drawTrackEnd(g, cells[0], cells[1], line.exitStart);
+      this.drawTrackEnd(g, cells[cells.length - 1], cells[cells.length - 2], line.exitEnd);
+    }
+  }
+
   private redraw(): void {
     const g = this.gfx;
     g.clear();
     g.lineCap = Graphics.LineCap.ROUND;
     g.lineJoin = Graphics.LineJoin.ROUND;
-    const cached = this.levelLineCells();
-    for (let lineIndex = 0; lineIndex < cached.length; lineIndex++) {
-      const cells = cached[lineIndex];
-      const line = this.game.lines[lineIndex];
-      if (!line || cells.length === 0) continue;
-      g.strokeColor = PATH;
-      g.lineWidth = this.trackWidth;
-      const first = this.toLocal(cells[0]);
-      g.moveTo(first.x, first.y);
-      for (let i = 1; i < cells.length; i++) {
-        const p = this.toLocal(cells[i]);
-        g.lineTo(p.x, p.y);
-      }
-      g.stroke();
-      this.drawExitCap(g, cells, line.exitStart, "start");
-      this.drawExitCap(g, cells, line.exitEnd, "end");
-    }
-
     if (this.preview) this.drawPreview(g, this.preview);
-    const moving = this.anim ? this.animPoint(this.anim) : null;
+    if (this.exitPulse) this.drawExitPulse(g, this.exitPulse.trace, this.exitPulse.elapsed / EXIT_PULSE_TIME);
+    const anim = this.anim;
+    const moving = anim ? this.animPoint(anim) : null;
+    const blockerId = this.preview?.blockerId ?? (anim && anim.elapsed >= anim.duration ? anim.trace.blockerId : null);
     for (const arrow of this.game.arrows) {
-      if (this.anim && arrow.id === this.anim.id && moving) {
-        const squash = this.anim.bounce && this.animFraction(this.anim) > 0.42 && this.animFraction(this.anim) < 0.62;
-        this.drawArrow(g, moving.x, moving.y, arrow.dir, squash ? 0.82 : 1, true);
+      if (arrow.id === anim?.trace.arrowId && moving) {
+        this.drawArrow(g, moving.x, moving.y, arrow.dir, true);
         continue;
       }
       const p = this.toLocal(arrow);
-      const hot = arrow.id === this.holdId || arrow.id === this.game.highlightId;
-      this.drawArrow(g, p.x, p.y, arrow.dir, 1, hot);
+      const hinted = arrow.id === this.game.highlightId;
+      const held = arrow.id === this.holdId;
+      this.drawArrow(g, p.x, p.y, arrow.dir, held || hinted, held && this.armed);
+      if (arrow.id === blockerId) this.drawTokenRing(g, p, DANGER);
+      else if (held && this.armed) this.drawTokenRing(g, p, ACCENT);
+      else if (hinted && !held) this.drawTokenRing(g, p, OPEN);
     }
     if (this.showsGhost()) this.drawGhost(g, this.game.arrows[0]);
   }
 
-  private drawExitCap(g: Graphics, cells: Cell[], open: boolean, which: "start" | "end"): void {
-    if (!open || cells.length < 2) return;
-    const tip = which === "end" ? cells[cells.length - 1] : cells[0];
-    const inward = which === "end" ? cells[cells.length - 2] : cells[1];
+  private drawTrackEnd(g: Graphics, tip: Cell, inward: Cell, open: boolean): void {
     const dx = tip.x - inward.x;
     const dy = tip.y - inward.y;
-    if (dx === 0 && dy === 0) return;
     const p = this.toLocal(tip);
-    const len = this.cellSize * 0.22;
-    g.strokeColor = ACCENT;
-    g.lineWidth = Math.max(2, this.cellSize * 0.04);
-    g.moveTo(p.x, p.y);
-    g.lineTo(p.x + dx * len, p.y + dy * len);
+    const wing = this.trackWidth * 0.9 + 3;
+    g.strokeColor = open ? OPEN : TABLE.stop;
+    g.lineWidth = Math.max(4, Math.min(6, this.trackWidth * 0.55));
+    if (open) {
+      const length = this.cellSize * EXIT_MARK_LENGTH;
+      for (const side of [-1, 1]) {
+        g.moveTo(p.x - dy * wing * 0.52 * side, p.y + dx * wing * 0.52 * side);
+        g.lineTo(p.x + dx * length - dy * wing * side, p.y + dy * length + dx * wing * side);
+      }
+    } else {
+      const x = p.x + dx * this.trackWidth / 2;
+      const y = p.y + dy * this.trackWidth / 2;
+      g.moveTo(x - dy * wing, y + dx * wing);
+      g.lineTo(x + dy * wing, y - dx * wing);
+    }
+    g.stroke();
+  }
+
+  private drawExitPulse(g: Graphics, trace: Trace, progress: number): void {
+    const end = this.traceEndpoint(trace, true);
+    const radius = Math.max(8, this.cellSize * (0.08 + progress * 0.13));
+    EXIT_PULSE.a = Math.round(220 * (1 - progress));
+    g.strokeColor = EXIT_PULSE;
+    g.lineWidth = Math.max(2, this.trackWidth * 0.28);
+    g.circle(end.x, end.y, radius);
     g.stroke();
   }
 
   private drawPreview(g: Graphics, trace: Trace): void {
-    const points = trace.points.map((cell) => this.toLocal(cell));
-    const alpha = trace.result === "exit" ? 230 : Math.round(140 + 100 * Math.abs(Math.sin(this.blink * 8)));
-    PREVIEW_COLOR.a = alpha;
-    g.strokeColor = PREVIEW_COLOR;
+    const start = this.toLocal(trace.points[0]);
+    const end = this.traceEndpoint(trace, true);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const length = Math.hypot(dx, dy);
+    if (length < 1) return;
+    const ux = dx / length;
+    const uy = dy / length;
+    const blocked = trace.result !== "exit";
+    g.strokeColor = blocked ? DANGER : this.armed ? ACCENT : OPEN;
     g.lineWidth = Math.max(3, this.cellSize * 0.06);
     const dash = Math.max(8, this.cellSize * 0.2);
-    const gap = dash * 0.65;
-    for (let i = 0; i < points.length - 1; i++) {
-      const a = points[i];
-      const b = points[i + 1];
-      const len = Math.hypot(b.x - a.x, b.y - a.y);
-      if (len < 1) continue;
-      const ux = (b.x - a.x) / len;
-      const uy = (b.y - a.y) / len;
-      let walked = 0;
-      while (walked < len) {
-        const end = Math.min(len, walked + dash);
-        g.moveTo(a.x + ux * walked, a.y + uy * walked);
-        g.lineTo(a.x + ux * end, a.y + uy * end);
-        walked = end + gap;
-      }
+    for (let offset = 0; offset < length; offset += dash * 1.65) {
+      const stop = Math.min(length, offset + dash);
+      g.moveTo(start.x + ux * offset, start.y + uy * offset);
+      g.lineTo(start.x + ux * stop, start.y + uy * stop);
+    }
+    if (blocked) {
+      const cap = Math.max(5, this.tokenRadius * 0.28);
+      g.moveTo(end.x - uy * cap, end.y + ux * cap);
+      g.lineTo(end.x + uy * cap, end.y - ux * cap);
     }
     g.stroke();
-    if (trace.hit) {
-      const hit = this.toLocal(trace.hit);
-      g.fillColor = PREVIEW_COLOR;
-      g.circle(hit.x, hit.y, this.cellSize * 0.12);
-      g.fill();
-    }
   }
 
-  private drawArrow(g: Graphics, x: number, y: number, dir: Dir, scale: number, hot: boolean): void {
+  private tokenRimWidth(): number {
+    return Math.max(2, this.tokenRadius * 0.14);
+  }
+
+  private drawTokenRing(g: Graphics, p: Vec2, color: Color): void {
+    g.strokeColor = color;
+    g.lineWidth = Math.max(4, this.tokenRadius * 0.12);
+    g.circle(p.x, p.y, this.tokenRadius + Math.max(4, this.tokenRadius * 0.2));
+    g.stroke();
+  }
+
+  private drawArrow(g: Graphics, x: number, y: number, dir: Dir, selected: boolean, armed = false): void {
     const d = dirVector(dir);
-    const radius = Math.max(8, this.tokenRadius * scale);
-    g.fillColor = hot ? TOKEN_HOT : TOKEN;
+    const radius = this.tokenRadius;
+    g.fillColor = TABLE.shadow;
+    g.circle(x, y - Math.max(2, radius * 0.14), radius * 1.02);
+    g.fill();
+    g.fillColor = armed ? TOKEN_HOT : selected ? TOKEN_SELECTED : TOKEN;
     g.circle(x, y, radius);
     g.fill();
-    g.strokeColor = hot ? ACCENT : TOKEN_RIM;
-    g.lineWidth = Math.max(2, radius * 0.14);
+    g.strokeColor = armed ? ACCENT : selected ? OPEN : TOKEN_RIM;
+    g.lineWidth = this.tokenRimWidth();
     g.circle(x, y, radius);
     g.stroke();
-    const len = radius * 1.35;
-    const head = radius * 0.78;
-    const ink = hot ? ACCENT : INK;
+    g.fillColor = TOKEN_INNER;
+    g.ellipse(x - radius * 0.23, y + radius * 0.69, radius * 0.28, radius * 0.085);
+    g.fill();
+    const len = radius * 0.79;
+    const head = radius * 0.71;
+    const ink = armed ? TOKEN_HOT_INK : TOKEN_ARROW;
     g.strokeColor = ink;
-    g.lineWidth = Math.max(3, radius * 0.32);
-    g.moveTo(x - d.x * len * 0.2, y - d.y * len * 0.2);
-    g.lineTo(x + d.x * len * 0.72, y + d.y * len * 0.72);
+    g.lineWidth = Math.max(3, radius * 0.34);
+    g.moveTo(x - d.x * radius * 0.57, y - d.y * radius * 0.57);
+    g.lineTo(x + d.x * len * 0.45, y + d.y * len * 0.45);
     g.stroke();
     const px = -d.y;
     const py = d.x;
@@ -575,12 +793,35 @@ export class GameController extends Component {
   private drawGhost(g: Graphics, arrow: ArrowDef): void {
     const origin = this.toLocal(arrow);
     const d = dirVector(arrow.dir);
-    const t = (Math.sin(this.ghost * 2.2) + 1) / 2;
-    const x = origin.x + d.x * this.cellSize * 0.55 * t;
-    const y = origin.y + d.y * this.cellSize * 0.55 * t;
-    g.fillColor = GHOST;
-    g.circle(x, y, Math.max(8, this.tokenRadius * 0.55));
+    const phase = (this.ghost % 1.8) / 1.8;
+    const t = Math.min(1, phase / 0.82);
+    const distance = this.cellSize * (0.15 + 0.52 * t);
+    const x = origin.x + d.x * distance;
+    const y = origin.y + d.y * distance - this.tokenRadius * 0.28;
+    const size = Math.max(16, this.tokenRadius * 0.63);
+    g.strokeColor = GHOST;
+    g.lineWidth = Math.max(2, size * 0.06);
+    g.circle(x, y + size * 0.55, size * 0.29);
+    g.stroke();
+    g.fillColor = BUTTON;
+    this.drawHandPath(g, x, y, size);
     g.fill();
+    g.strokeColor = TOKEN_RIM;
+    g.lineWidth = Math.max(2.5, size * 0.085);
+    this.drawHandPath(g, x, y, size);
+    g.stroke();
+  }
+
+  private drawHandPath(g: Graphics, x: number, y: number, s: number): void {
+    g.moveTo(x - s * 0.14, y - s * 0.13);
+    g.lineTo(x - s * 0.14, y + s * 0.48);
+    g.bezierCurveTo(x - s * 0.14, y + s * 0.68, x + s * 0.18, y + s * 0.68, x + s * 0.18, y + s * 0.48);
+    g.lineTo(x + s * 0.18, y + s * 0.08);
+    g.bezierCurveTo(x + s * 0.51, y + s * 0.08, x + s * 0.64, y - s * 0.12, x + s * 0.54, y - s * 0.42);
+    g.bezierCurveTo(x + s * 0.49, y - s * 0.59, x + s * 0.31, y - s * 0.66, x + s * 0.1, y - s * 0.63);
+    g.bezierCurveTo(x - s * 0.09, y - s * 0.61, x - s * 0.25, y - s * 0.44, x - s * 0.41, y - s * 0.25);
+    g.bezierCurveTo(x - s * 0.53, y - s * 0.1, x - s * 0.34, y + s * 0.02, x - s * 0.23, y - s * 0.07);
+    g.close();
   }
 
   private onTouchStart(event: EventTouch): void {
@@ -609,14 +850,21 @@ export class GameController extends Component {
 
   private onTouchEnd(event: EventTouch): void {
     if (event.getID() !== this.activeTouch) return;
-    const id = this.holdId;
-    const launch = this.armed;
+    const id = this.armed ? this.holdId : null;
+    this.clearTouch();
+    if (id) this.launch(id);
+  }
+
+  private onTouchCancel(event: EventTouch): void {
+    if (event.getID() === this.activeTouch) this.clearTouch();
+  }
+
+  private clearTouch(): void {
     this.activeTouch = null;
     this.holdId = null;
     this.armed = false;
     this.preview = null;
     this.game.setFingerDown(false);
-    if (id && launch) this.launch(id);
   }
 
   private touchPoint(event: EventTouch): Vec2 {
@@ -644,26 +892,25 @@ export class GameController extends Component {
   private launch(id: string): void {
     const trace = this.game.beginSlide(id);
     if (!trace) return;
-    const points = trace.points.map((cell) => {
-      const local = this.toLocal(cell);
-      return new Vec2(local.x, local.y);
-    });
-    let length = 0;
-    for (let i = 1; i < points.length; i++) length += Math.hypot(points[i].x - points[i - 1].x, points[i].y - points[i - 1].y);
+    const start = this.toLocal(trace.points[0]);
+    const end = this.traceEndpoint(trace, false);
+    const length = Math.hypot(end.x - start.x, end.y - start.y);
     const duration = Math.max(0.12, length / 900);
-    this.anim = { id, points, duration, elapsed: 0, bounce: trace.result !== "exit" };
+    this.anim = { trace, duration, elapsed: 0 };
   }
 
   private stepAnim(dt: number): void {
     if (!this.anim) return;
     this.anim.elapsed += dt;
-    const limit = this.anim.bounce ? this.anim.duration * 2 : this.anim.duration;
+    const limit = this.anim.trace.result === "exit" ? this.anim.duration : this.anim.duration * 2;
     if (this.anim.elapsed < limit) return;
+    const trace = this.anim.trace;
     const result = this.game.commitSlide();
     this.anim = null;
     this.layout();
     if (result.firstBounce && this.game.bounceTip) this.flashToast(this.game.bounceTip);
     if (result.outcome === "win") {
+      this.exitPulse = { trace, elapsed: 0 };
       void this.settleWin();
       return;
     }
@@ -671,21 +918,31 @@ export class GameController extends Component {
     if (this.game.phase === "timeout") this.openTimeout();
   }
 
-  private animFraction(anim: Anim): number {
-    const limit = anim.bounce ? anim.duration * 2 : anim.duration;
-    return Math.min(1, anim.elapsed / Math.max(0.01, limit));
+  private traceEndpoint(trace: Trace, preview: boolean): Vec2 {
+    const start = this.toLocal(trace.points[0]);
+    const end = this.toLocal(trace.points[trace.points.length - 1]);
+    const dx = end.x - start.x;
+    const dy = end.y - start.y;
+    const distance = Math.hypot(dx, dy);
+    const edge = this.tokenRadius + this.tokenRimWidth() / 2;
+    // 预览指到障碍边缘。动画还要给滑行的圆牌留出自身半径。
+    let inset = preview ? this.cellSize * (1 - EXIT_MARK_LENGTH) : 0;
+    if (trace.result === "arrow") inset = preview ? edge : edge * 2;
+    if (trace.result === "wall") {
+      // 规则轨迹的墙在轨道外一格，画面上以轨道末端为界。
+      inset = this.cellSize - this.trackWidth / 2 + (preview ? 0 : edge);
+    }
+    const t = distance === 0 ? 0 : Math.max(0, 1 - inset / distance);
+    this.traceEndOut.set(start.x + dx * t, start.y + dy * t);
+    return this.traceEndOut;
   }
 
   private animPoint(anim: Anim): Vec2 {
-    const span = Math.max(1, anim.points.length - 1);
-    let t = this.animFraction(anim);
-    if (anim.bounce) t = t <= 0.5 ? t * 2 : (1 - t) * 2;
-    const dist = t * span;
-    const index = Math.min(span - 1, Math.floor(dist));
-    const local = dist - index;
-    const a = anim.points[index];
-    const b = anim.points[index + 1] ?? a;
-    this.animPointOut.set(a.x + (b.x - a.x) * local, a.y + (b.y - a.y) * local);
+    const start = this.toLocal(anim.trace.points[0]);
+    const end = this.traceEndpoint(anim.trace, false);
+    const progress = anim.elapsed / anim.duration;
+    const t = progress <= 1 ? progress : Math.max(0, 2 - progress);
+    this.animPointOut.set(start.x + (end.x - start.x) * t, start.y + (end.y - start.y) * t);
     return this.animPointOut;
   }
 
@@ -792,10 +1049,8 @@ export class GameController extends Component {
     this.hideModal();
     this.game.restart();
     this.anim = null;
-    this.preview = null;
-    this.holdId = null;
-    this.armed = false;
-    this.activeTouch = null;
+    this.exitPulse = null;
+    this.clearTouch();
     this.layout();
   }
 
@@ -964,6 +1219,7 @@ export class GameController extends Component {
     bText: string | null,
     bAction: (() => void) | null,
   ): void {
+    this.clearTouch();
     this.modalTitle.string = title;
     this.modalBody.string = body;
     this.modalALabel.string = aText;

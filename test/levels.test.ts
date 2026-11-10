@@ -1,65 +1,106 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { arrowCountForLevel, generateAll, generateLevel } from "../assets/scripts/core/generate";
-import { traceArrow } from "../assets/scripts/core/trace";
+import { cellKey, dirSign, exitableIds, forwardCells, locateArrow, traceArrow } from "../assets/scripts/core/trace";
 import type { Level } from "../assets/scripts/core/types";
 import { LEVEL_COUNT } from "../assets/scripts/core/types";
 import { validateLevel } from "../assets/scripts/core/validate";
-
-function band(levelId: number): [number, number] {
-  if (levelId === 2) return [2, 2];
-  if (levelId <= 3) return [1, 1];
-  if (levelId <= 10) return [2, 3];
-  if (levelId <= 25) return [3, 5];
-  if (levelId <= 45) return [5, 8];
-  return [7, 12];
-}
 
 function bodyOf(level: Level): string {
   return JSON.stringify({ lines: level.lines, arrows: level.arrows, solution: level.solution });
 }
 
-test("60 levels are generated and solved by their standard solution", () => {
-  const generated = generateAll();
-  assert.equal(generated.length, LEVEL_COUNT);
-  let crossings = 0;
-  for (let id = 1; id <= LEVEL_COUNT; id++) {
-    const level = generateLevel(id);
-    assert.equal(level.id, id);
-    assert.deepEqual(generated[id - 1], level);
-    const checked = validateLevel(level);
-    assert.equal(checked.ok, true, `${id}: ${checked.errors.join(",")}`);
-    const [lo, hi] = band(id);
-    assert.equal(level.arrows.length, arrowCountForLevel(id));
-    assert.ok(level.arrows.length >= lo && level.arrows.length <= hi, `band ${id}`);
-    const axes = new Set(level.lines.map((line) => line.axis));
-    if (axes.has("H") && axes.has("V")) crossings += 1;
-  }
-  assert.ok(crossings >= 40, `expected most levels to cross, got ${crossings}`);
-});
+function blockersFor(level: Level) {
+  const occupied = new Map(level.arrows.map(arrow => [cellKey(arrow.x, arrow.y), arrow]));
+  return new Map(level.arrows.map(arrow => {
+    const blockers = forwardCells(level, arrow).flatMap(cell => {
+      const other = occupied.get(cellKey(cell.x, cell.y));
+      return other ? [other.id] : [];
+    });
+    return [arrow.id, blockers];
+  }));
+}
 
-test("no two levels are identical except id", () => {
+function longestChain(level: Level): number {
+  const blockers = blockersFor(level);
+  const depths = new Map<string, number>();
+  for (const id of level.solution) {
+    const prerequisites = blockers.get(id)!.map(other => {
+      const depth = depths.get(other);
+      assert.ok(depth, `level ${level.id}: ${other} should precede ${id}`);
+      return depth;
+    });
+    depths.set(id, 1 + Math.max(0, ...prerequisites));
+  }
+  return Math.max(...depths.values());
+}
+
+test("60 fixed levels are distinct and can be cleared by their standard solution", () => {
+  const campaign = generateAll();
+  assert.equal(campaign.length, LEVEL_COUNT);
   const seen = new Map<string, number>();
-  for (const level of generateAll()) {
+  for (const level of campaign) {
+    assert.deepEqual(generateLevel(level.id), level);
+    const checked = validateLevel(level);
+    assert.ok(checked.ok, `level ${level.id}: ${checked.errors.join(",")}`);
+    assert.equal(level.arrows.length, arrowCountForLevel(level.id));
     const body = bodyOf(level);
-    const previous = seen.get(body);
-    assert.equal(previous, undefined, `level ${level.id} duplicates level ${previous}`);
+    assert.equal(seen.get(body), undefined, `level ${level.id} duplicates another layout`);
     seen.set(body, level.id);
   }
 });
 
-test("level 10 crosses tracks on the way into the timed levels", () => {
-  const level = generateLevel(10);
-  const six = generateLevel(6);
-  const axes = new Set(level.lines.map((line) => line.axis));
-  assert.ok(axes.has("H") && axes.has("V"));
-  assert.notEqual(bodyOf(level), bodyOf(six));
-  assert.equal(traceArrow(level, level.arrows, "a1").result, "exit");
-  assert.equal(traceArrow(level, level.arrows, "a2").blockerId, "a1");
-  const down = traceArrow(level, level.arrows, "a3");
-  assert.equal(down.result, "arrow");
-  assert.equal(down.blockerId, "a2");
-  assert.equal(validateLevel(level).ok, true);
+test("every campaign rail has a rider and every rail on a crossing board affects another rail", () => {
+  for (const level of generateAll()) {
+    const riders = new Map(level.arrows.map(arrow => [arrow.id, locateArrow(level, arrow)!.line]));
+    const linked = new Set();
+    for (const [id, blockers] of blockersFor(level)) {
+      const ownRail = riders.get(id)!;
+      for (const blocker of blockers) {
+        const otherRail = riders.get(blocker)!;
+        if (ownRail.axis === otherRail.axis) continue;
+        linked.add(ownRail);
+        linked.add(otherRail);
+      }
+    }
+
+    for (const line of level.lines) {
+      const here = level.arrows.filter(arrow => riders.get(arrow.id) === line);
+      assert.ok(here.length > 0, `level ${level.id}: empty ${line.axis} rail at ${line.fixed}`);
+      if (level.lines.length > 1) {
+        assert.ok(linked.has(line), `level ${level.id}: isolated ${line.axis} rail at ${line.fixed}`);
+      }
+      assert.equal(line.exitStart, here.some(arrow => dirSign(arrow.dir) < 0));
+      assert.equal(line.exitEnd, here.some(arrow => dirSign(arrow.dir) > 0));
+    }
+  }
+});
+
+test("the campaign builds from the first timed puzzles to a deeper finale", () => {
+  const campaign = generateAll();
+  const depths = campaign.map(longestChain);
+  for (const [id, arrows, depth] of [[9, 5, 4], [11, 6, 5], [12, 7, 5], [13, 8, 6]]) {
+    const level = campaign[id - 1];
+    assert.equal(level.arrows.length, arrows);
+    assert.ok(depths[id - 1] >= depth, `level ${id} lost its chain`);
+    assert.ok(exitableIds(level, level.arrows).length <= 2, `level ${id} has too many openers`);
+  }
+
+  const chapterDepths = Array.from({ length: 6 }, (_, chapter) => {
+    const block = depths.slice(chapter * 10, chapter * 10 + 10);
+    return block.reduce((sum, depth) => sum + depth, 0) / block.length;
+  });
+  for (const [i, depth] of chapterDepths.entries()) {
+    if (i > 0) assert.ok(depth > chapterDepths[i - 1], `chapter ${i + 1} did not progress`);
+  }
+  for (const id of [14, 18, 25, 29, 34, 38, 45, 49, 54, 58]) {
+    assert.ok(depths[id - 1] < depths[id - 2], `level ${id} lost its relief beat`);
+  }
+
+  const finale = campaign[LEVEL_COUNT - 1];
+  assert.equal(finale.arrows.length, 20);
+  assert.ok(depths.at(-1)! > Math.max(...depths.slice(0, -1)));
+  assert.ok(exitableIds(finale, finale.arrows).length <= 4);
 });
 
 test("level 1 previews a clear exit and level 2 teaches a block", () => {
